@@ -459,7 +459,12 @@ class WebSocketHandler:
         # idle through PhaseEmitter.force_idle() (consistent phase state +
         # racing-`thinking` suppression); it is APPENDED near the end of the
         # pipeline below, before transport.output().
-        phase_emitter = PhaseEmitter(send_phase=self.broadcast_phase)
+        # With the timed follow-up window off, open the mic again only after
+        # replies that end with a question (firmware's request_follow_up path).
+        phase_emitter = PhaseEmitter(
+            send_phase=self.broadcast_phase,
+            request_follow_up=self.broadcast_request_follow_up if self.follow_up_ms == 0 else None,
+        )
 
         pipeline_components = [
             transport.input(),
@@ -488,14 +493,14 @@ class WebSocketHandler:
                 context_aggregator.user(),
                 TranscriptLogger(capture="user"),
                 openai_service,
-                TranscriptLogger(capture="assistant"),
+                TranscriptLogger(capture="assistant", on_assistant_reply=phase_emitter.note_assistant_reply),
                 context_aggregator.assistant(),
             ])
         else:
             pipeline_components.extend([
                 TranscriptLogger(capture="user"),
                 openai_service,
-                TranscriptLogger(capture="assistant"),
+                TranscriptLogger(capture="assistant", on_assistant_reply=phase_emitter.note_assistant_reply),
             ])
 
         pipeline_components.append(output_activity_tracker)
@@ -750,6 +755,10 @@ class WebSocketHandler:
         """Send a JSON object to every connected device as a TEXT frame."""
         for ws in list(self._websockets):
             await self._send_json(ws, obj)
+
+    async def broadcast_request_follow_up(self) -> None:
+        """Ask every connected device to open the mic for one answer."""
+        await self.broadcast_json({"type": "request_follow_up"})
 
     async def broadcast_phase(self, value: str) -> None:
         """Send a va_client phase message to every connected device."""

@@ -54,9 +54,10 @@ class TranscriptLogger(FrameProcessor):
             the LLM), "user" (TranscriptionFrame, place BEFORE the LLM), or "both".
     """
 
-    def __init__(self, capture: str = "both", **kwargs):
+    def __init__(self, capture: str = "both", on_assistant_reply=None, **kwargs):
         super().__init__(**kwargs)
         self._capture = capture
+        self._on_assistant_reply = on_assistant_reply
         self._assistant_buf: list[str] = []
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -74,6 +75,8 @@ class TranscriptLogger(FrameProcessor):
                 self._assistant_buf = []
                 if text:
                     logger.info(f"🤖 assistant: {text}")
+                    if self._on_assistant_reply is not None:
+                        self._on_assistant_reply(text)
 
         if self._capture in ("user", "both"):
             if isinstance(frame, TranscriptionFrame):

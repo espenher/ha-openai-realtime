@@ -119,7 +119,7 @@ class PhaseEmitter(FrameProcessor):
     # How often to log that we're deliberately waiting on a running tool.
     INFLIGHT_LOG_EVERY_S = 30.0
 
-    def __init__(self, send_phase, idle_debounce_s: float = None, **kwargs):
+    def __init__(self, send_phase, idle_debounce_s: float = None, request_follow_up=None, **kwargs):
         """
         Args:
             send_phase: async callable(value: str) that delivers the phase to
@@ -161,6 +161,18 @@ class PhaseEmitter(FrameProcessor):
         # genuine new utterance — never cancel ITS response).
         self._on_dangling_stop = None
         self._on_real_speech = None
+        # Question-only follow-up: async callable that asks the device to open
+        # the mic once more (va_client's {"type":"request_follow_up"}). Set only
+        # when the timed follow-up window is off; fired after the debounced idle
+        # when the last reply ended with a question mark.
+        self._request_follow_up = request_follow_up
+        self._last_reply_question = False
+
+    def note_assistant_reply(self, text: str) -> None:
+        """Remember whether the latest reply ended with a question, so the turn's
+        idle can ask the device to listen for the answer."""
+        # Ignore trailing quotes/brackets, e.g. a reply ending ?" or ?)
+        self._last_reply_question = text.rstrip(" \"'”’)").endswith("?")
 
     def note_wake(self) -> None:
         """Device woke (or a follow-up window closed without speech). Until the
@@ -244,6 +256,13 @@ class PhaseEmitter(FrameProcessor):
             self._arm_watchdog()
             return
         await self._emit("idle")
+        if self._last_reply_question and self._request_follow_up is not None:
+            self._last_reply_question = False
+            logger.info("❓ reply ended with a question → request_follow_up")
+            try:
+                await self._request_follow_up()
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to request follow-up: {e}")
 
     async def _thinking_watchdog(self) -> None:
         """Force idle when `thinking` sits with no model activity (dead turn)."""
@@ -284,6 +303,7 @@ class PhaseEmitter(FrameProcessor):
 
         if isinstance(frame, UserStartedSpeakingFrame):
             self._suppress_thinking = False
+            self._last_reply_question = False
             # A: a genuine utterance has begun this turn → not a dangling VAD,
             # and the kill-window must NOT cancel THIS turn's response.
             self._speech_since_wake = True
