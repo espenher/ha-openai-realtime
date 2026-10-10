@@ -255,6 +255,11 @@ class PhaseEmitter(FrameProcessor):
             await self._emit("thinking")
             self._arm_watchdog()
             return
+        await self._finish_turn()
+
+    async def _finish_turn(self) -> None:
+        """Go idle, then ask the device to listen for an answer if the reply
+        ended with a question."""
         await self._emit("idle")
         if self._last_reply_question and self._request_follow_up is not None:
             self._last_reply_question = False
@@ -343,9 +348,16 @@ class PhaseEmitter(FrameProcessor):
             self._cancel_watchdog()
             await self._emit("replying")
         elif isinstance(frame, BotStoppedSpeakingFrame):
-            # Don't go idle immediately — TTS comes in segments. Only emit idle
-            # if the bot stays silent for the debounce window.
             self._cancel_pending_idle()
-            self._idle_task = asyncio.create_task(self._emit_idle_after_debounce())
+            if (self._last_reply_question and self._request_follow_up is not None
+                    and TURN_LIVENESS.in_flight == 0):
+                # The reply is complete (its transcript already ended with a
+                # question) and no tool is running, so nothing more is coming:
+                # skip the debounce and hand over to the user straight away.
+                await self._finish_turn()
+            else:
+                # Don't go idle immediately — TTS comes in segments. Only emit
+                # idle if the bot stays silent for the debounce window.
+                self._idle_task = asyncio.create_task(self._emit_idle_after_debounce())
 
         await self.push_frame(frame, direction)
