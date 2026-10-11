@@ -20,7 +20,7 @@ from pipecat.services.openai.realtime import events as openai_rt_events
 from app.raw_audio_serializer import RawAudioSerializer
 from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
-from app.phase_emitter import PhaseEmitter
+from app.phase_emitter import PhaseEmitter, STALE_AUDIO
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)
@@ -616,6 +616,8 @@ class WebSocketHandler:
         _kill_next_response = {"v": False}
 
         async def _on_device_interrupt():
+            # The device closed its mic; speech reported before the next wake is late audio.
+            phase_emitter.note_device_mic_closed()
             _interrupt_kill_until["t"] = time.monotonic() + INTERRUPT_KILL_WINDOW_S
             # Arm the next-response kill on EVERY stop (see the flag comment):
             # the 1.5 s time-window alone misses responses that land later —
@@ -637,6 +639,18 @@ class WebSocketHandler:
 
         @openai_service.event_handler("on_conversation_item_created")
         async def _kill_racing_response(service, item_id, item):
+            # Late audio after the device closed its mic: cancel whatever the
+            # model makes of it, a spoken reply or a tool call alike.
+            if STALE_AUDIO.active and (
+                getattr(item, "role", None) == "assistant"
+                or getattr(item, "type", None) == "function_call"
+            ):
+                try:
+                    await openai_service.send_client_event(openai_rt_events.ResponseCancelEvent())
+                    logger.info("🛑 response to late audio → response.cancel")
+                except Exception as e:
+                    logger.info(f"🛑 late-audio response cancel no-op ({e!r})")
+                return
             # Pipecat fires this for every conversation.item.added; only an
             # ASSISTANT item right after a device interrupt is the racing
             # response to the stop word the user just cancelled.
@@ -681,6 +695,7 @@ class WebSocketHandler:
             # Also a turn boundary for the dangling-VAD guard: the follow-up
             # closed without speech, so any later server-VAD stop is dangling.
             phase_emitter.note_wake()
+            phase_emitter.note_device_mic_closed()
             try:
                 await openai_service.send_client_event(openai_rt_events.InputAudioBufferClearEvent())
                 logger.info("🧽 follow-up cut-off → input_audio_buffer.clear (drop partial utterance)")
@@ -694,6 +709,7 @@ class WebSocketHandler:
             # segment closing late → suppress its thinking + cancel its garbage
             # response (handled in PhaseEmitter via the kill-window callbacks).
             phase_emitter.note_wake()
+            phase_emitter.note_device_mic_opened()
             # New turn boundary: drop any pending post-tool kill so it can't
             # leak onto this fresh turn's response.
             _kill_next_response["v"] = False
@@ -708,6 +724,13 @@ class WebSocketHandler:
             # window and the post-tool flag so neither can cancel it.
             _interrupt_kill_until["t"] = 0.0
             _kill_next_response["v"] = False
+
+        async def _on_stale_speech():
+            # Drop the late audio before the VAD can commit it as a turn.
+            await openai_service.send_client_event(openai_rt_events.InputAudioBufferClearEvent())
+            logger.info("🧽 late audio → input_audio_buffer.clear")
+
+        phase_emitter.set_stale_speech_handler(_on_stale_speech)
 
         phase_emitter.set_kill_window_handlers(
             on_dangling=lambda: _interrupt_kill_until.__setitem__(

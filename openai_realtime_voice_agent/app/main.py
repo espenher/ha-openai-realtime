@@ -11,7 +11,7 @@ from pipecat.pipeline.task import PipelineTask
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 from pipecat.transports.websocket.server import WebsocketServerTransport
 from app.mcp_service import HomeAssistantMCPService
-from app.phase_emitter import TURN_LIVENESS
+from app.phase_emitter import TURN_LIVENESS, STALE_AUDIO
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
 from app.web_search_tool import get_web_search_tool_definition, create_web_search_tool_handler
 from app.audio_recording_service import AudioRecordingService
@@ -175,6 +175,15 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         inspects the signature to pick the calling convention).
         """
         async def liveness_tracked(params):
+            if STALE_AUDIO.active:
+                # Last line of defence: never act on late audio (see StaleAudio).
+                logger.warning(f"🛑 tool '{function_name}' refused — request came from late audio")
+                await params.result_callback({
+                    "success": False,
+                    "error": "Ignored: this request came from garbled late audio after the "
+                             "microphone closed. Do not act on it.",
+                })
+                return
             TURN_LIVENESS.tool_started()
             try:
                 return await handler(params)

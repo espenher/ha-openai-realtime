@@ -109,6 +109,21 @@ class TurnLiveness:
 TURN_LIVENESS = TurnLiveness()
 
 
+class StaleAudio:
+    """Set while the device's mic is closed (after a device interrupt or a
+    follow-up timeout) and the server VAD nevertheless reports speech. That
+    speech is late audio from a turn the device already gave up on — e.g. the
+    no-speech watchdog fired because OpenAI's VAD lagged — so it must not
+    become a turn. Tools check this and refuse to run; responses are cancelled.
+    Cleared on the next wake. Module-level singleton like TURN_LIVENESS."""
+
+    def __init__(self) -> None:
+        self.active = False
+
+
+STALE_AUDIO = StaleAudio()
+
+
 class PhaseEmitter(FrameProcessor):
     """Forwards phase transitions to the device as JSON text frames."""
 
@@ -177,6 +192,23 @@ class PhaseEmitter(FrameProcessor):
         self._response_open = False
         self._reply_done = False
         self._tools_at_response_start = 0
+        # True while the device's mic is closed (interrupt / follow-up timeout)
+        # until the next wake. Speech the VAD reports meanwhile is stale.
+        self._device_mic_closed = False
+        self._on_stale_speech = None
+
+    def note_device_mic_closed(self) -> None:
+        """The device closed its mic (interrupt or follow-up timeout)."""
+        self._device_mic_closed = True
+
+    def note_device_mic_opened(self) -> None:
+        """The device woke and opened its mic for a fresh turn."""
+        self._device_mic_closed = False
+        STALE_AUDIO.active = False
+
+    def set_stale_speech_handler(self, handler) -> None:
+        """Async callable run when speech starts while the device mic is closed."""
+        self._on_stale_speech = handler
 
     def note_response_start(self) -> None:
         """An assistant response began (LLMFullResponseStartFrame)."""
@@ -337,7 +369,20 @@ class PhaseEmitter(FrameProcessor):
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, UserStartedSpeakingFrame):
+        if isinstance(frame, UserStartedSpeakingFrame) and self._device_mic_closed:
+            # Late audio: the device already closed its mic for this turn.
+            # Don't emit `listening` (that would reopen the device mic) and
+            # don't let it become a turn.
+            STALE_AUDIO.active = True
+            logger.info("📞 speech reported after the device closed its mic — ignored (late audio)")
+            if self._on_stale_speech is not None:
+                try:
+                    await self._on_stale_speech()
+                except Exception as e:
+                    logger.warning(f"⚠️ stale-speech handler failed: {e!r}")
+        elif isinstance(frame, UserStoppedSpeakingFrame) and STALE_AUDIO.active:
+            logger.info("📞 'thinking' suppressed — late audio after the device closed its mic")
+        elif isinstance(frame, UserStartedSpeakingFrame):
             self._suppress_thinking = False
             self._last_reply_question = False
             self._reply_done = False
