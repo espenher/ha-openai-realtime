@@ -313,7 +313,11 @@ class PhaseEmitter(FrameProcessor):
         # while a tool is in flight); the tool's result response then flips the
         # phase to `replying`. Fast tools never reach here — their result reply
         # cancels this debounce first.
-        if TURN_LIVENESS.in_flight > 0:
+        # Same when a tool ran during the last response and has just finished:
+        # OpenAI is about to answer with its result, so the turn isn't over.
+        if TURN_LIVENESS.in_flight > 0 or (
+                TURN_LIVENESS.started != self._tools_at_response_start
+                and not self._response_open):
             await self._emit("thinking")
             self._arm_watchdog()
             return

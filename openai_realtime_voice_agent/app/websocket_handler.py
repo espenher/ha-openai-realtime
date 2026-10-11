@@ -491,7 +491,7 @@ class WebSocketHandler:
         if context_aggregator:
             pipeline_components.extend([
                 context_aggregator.user(),
-                TranscriptLogger(capture="user"),
+                TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
                 openai_service,
                 TranscriptLogger(
                     capture="assistant",
@@ -503,7 +503,7 @@ class WebSocketHandler:
             ])
         else:
             pipeline_components.extend([
-                TranscriptLogger(capture="user"),
+                TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
                 openai_service,
                 TranscriptLogger(
                     capture="assistant",
@@ -672,6 +672,8 @@ class WebSocketHandler:
             # user's stop pre-empted — a stop-acknowledgement ("Okay, I'll stop"),
             # a stopped tool's answer, or the cancelled reply's tail.
             _kill_next_response["v"] = False
+            if time.monotonic() - _dangling["armed_at"] < INTERRUPT_KILL_WINDOW_S + 0.5:
+                _dangling["cancelled_at"] = time.monotonic()
             try:
                 await openai_service.send_client_event(openai_rt_events.ResponseCancelEvent())
                 logger.info(
@@ -781,11 +783,36 @@ class WebSocketHandler:
 
         self.announce = _announce
 
+        # The dangling-VAD guard can misfire: if OpenAI's VAD was still "in
+        # speech" from before the wake, the user's real question closes that
+        # segment, the stop looks dangling, and its reply gets cancelled. The
+        # transcript then shows real words. Remember when the guard cancelled a
+        # reply so the transcript handler below can answer it after all.
+        _dangling = {"armed_at": 0.0, "cancelled_at": 0.0}
+
+        def _arm_dangling_kill():
+            _dangling["armed_at"] = time.monotonic()
+            _interrupt_kill_until["t"] = time.monotonic() + INTERRUPT_KILL_WINDOW_S
+
         phase_emitter.set_kill_window_handlers(
-            on_dangling=lambda: _interrupt_kill_until.__setitem__(
-                "t", time.monotonic() + INTERRUPT_KILL_WINDOW_S),
+            on_dangling=_arm_dangling_kill,
             on_real_speech=_clear_kill_window,
         )
+
+        async def _on_user_transcript(text: str):
+            if time.monotonic() - _dangling["cancelled_at"] > 5.0:
+                return
+            if STALE_AUDIO.active or len(text.split()) < 2:
+                return
+            _dangling["cancelled_at"] = 0.0
+            _clear_kill_window()
+            try:
+                await openai_service.send_client_event(openai_rt_events.ResponseCreateEvent())
+                logger.info("🔁 turn dropped as dangling VAD had real words → answering it after all")
+            except Exception as e:
+                logger.warning(f"⚠️ could not re-create response for dropped turn: {e!r}")
+
+        self._user_transcript_handler = _on_user_transcript
 
         if self._serializer is not None:
             self._serializer.set_interrupt_handler(_on_device_interrupt)
@@ -837,6 +864,12 @@ class WebSocketHandler:
         """Send a JSON object to every connected device as a TEXT frame."""
         for ws in list(self._websockets):
             await self._send_json(ws, obj)
+
+    def _dispatch_user_transcript(self, text: str) -> None:
+        """Hand a user transcript to the pipeline's handler (set in build_pipeline)."""
+        handler = getattr(self, "_user_transcript_handler", None)
+        if handler is not None:
+            asyncio.create_task(handler(text))
 
     async def broadcast_request_follow_up(self) -> None:
         """Ask every connected device to open the mic for one answer."""

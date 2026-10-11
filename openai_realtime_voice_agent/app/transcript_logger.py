@@ -56,9 +56,11 @@ class TranscriptLogger(FrameProcessor):
     """
 
     def __init__(self, capture: str = "both", on_assistant_reply=None,
-                 on_response_start=None, on_response_end=None, **kwargs):
+                 on_response_start=None, on_response_end=None,
+                 on_user_transcript=None, **kwargs):
         super().__init__(**kwargs)
         self._capture = capture
+        self._on_user_transcript = on_user_transcript
         self._on_assistant_reply = on_assistant_reply
         self._on_response_start = on_response_start
         self._on_response_end = on_response_end
@@ -92,5 +94,7 @@ class TranscriptLogger(FrameProcessor):
                 text = (frame.text or "").strip()
                 if text:
                     logger.info(f"🗣️ user: {text}")
+                    if self._on_user_transcript is not None:
+                        self._on_user_transcript(text)
 
         await self.push_frame(frame, direction)
