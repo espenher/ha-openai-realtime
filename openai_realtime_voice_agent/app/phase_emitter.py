@@ -92,9 +92,13 @@ class TurnLiveness:
     def __init__(self) -> None:
         self.in_flight = 0
         self.last_activity = 0.0
+        # Total tools ever started; lets PhaseEmitter tell whether a tool ran
+        # during the current response (so another response will follow it).
+        self.started = 0
 
     def tool_started(self) -> None:
         self.in_flight += 1
+        self.started += 1
         self.last_activity = time.monotonic()
 
     def tool_finished(self) -> None:
@@ -167,6 +171,32 @@ class PhaseEmitter(FrameProcessor):
         # when the last reply ended with a question mark.
         self._request_follow_up = request_follow_up
         self._last_reply_question = False
+        # Reply-complete tracking, fed by the assistant TranscriptLogger tap
+        # (response start/end brackets). Lets BotStoppedSpeaking skip the idle
+        # debounce once the final reply of a turn has finished.
+        self._response_open = False
+        self._reply_done = False
+        self._tools_at_response_start = 0
+
+    def note_response_start(self) -> None:
+        """An assistant response began (LLMFullResponseStartFrame)."""
+        self._response_open = True
+        self._reply_done = False
+        self._last_reply_question = False
+        self._tools_at_response_start = TURN_LIVENESS.started
+
+    def note_response_end(self) -> None:
+        """The assistant response finished generating (LLMFullResponseEndFrame)."""
+        self._response_open = False
+        self._reply_done = True
+
+    def _turn_is_over(self) -> bool:
+        """True when nothing more will be said this turn: the last response
+        has finished, no new one has started, and no tool ran during it (a tool
+        call means OpenAI will follow up with another response)."""
+        return (self._reply_done and not self._response_open
+                and TURN_LIVENESS.in_flight == 0
+                and TURN_LIVENESS.started == self._tools_at_response_start)
 
     def note_assistant_reply(self, text: str) -> None:
         """Remember whether the latest reply ended with a question, so the turn's
@@ -260,6 +290,7 @@ class PhaseEmitter(FrameProcessor):
     async def _finish_turn(self) -> None:
         """Go idle, then ask the device to listen for an answer if the reply
         ended with a question."""
+        self._reply_done = False
         await self._emit("idle")
         if self._last_reply_question and self._request_follow_up is not None:
             self._last_reply_question = False
@@ -309,6 +340,7 @@ class PhaseEmitter(FrameProcessor):
         if isinstance(frame, UserStartedSpeakingFrame):
             self._suppress_thinking = False
             self._last_reply_question = False
+            self._reply_done = False
             # A: a genuine utterance has begun this turn → not a dangling VAD,
             # and the kill-window must NOT cancel THIS turn's response.
             self._speech_since_wake = True
@@ -349,11 +381,10 @@ class PhaseEmitter(FrameProcessor):
             await self._emit("replying")
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._cancel_pending_idle()
-            if (self._last_reply_question and self._request_follow_up is not None
-                    and TURN_LIVENESS.in_flight == 0):
-                # The reply is complete (its transcript already ended with a
-                # question) and no tool is running, so nothing more is coming:
-                # skip the debounce and hand over to the user straight away.
+            if self._turn_is_over():
+                # The final reply has finished and nothing else is coming, so
+                # skip the debounce: the LED goes idle (and a question hands
+                # over to the user) as soon as the speech actually ends.
                 await self._finish_turn()
             else:
                 # Don't go idle immediately — TTS comes in segments. Only emit

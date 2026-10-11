@@ -493,14 +493,24 @@ class WebSocketHandler:
                 context_aggregator.user(),
                 TranscriptLogger(capture="user"),
                 openai_service,
-                TranscriptLogger(capture="assistant", on_assistant_reply=phase_emitter.note_assistant_reply),
+                TranscriptLogger(
+                    capture="assistant",
+                    on_assistant_reply=phase_emitter.note_assistant_reply,
+                    on_response_start=phase_emitter.note_response_start,
+                    on_response_end=phase_emitter.note_response_end,
+                ),
                 context_aggregator.assistant(),
             ])
         else:
             pipeline_components.extend([
                 TranscriptLogger(capture="user"),
                 openai_service,
-                TranscriptLogger(capture="assistant", on_assistant_reply=phase_emitter.note_assistant_reply),
+                TranscriptLogger(
+                    capture="assistant",
+                    on_assistant_reply=phase_emitter.note_assistant_reply,
+                    on_response_start=phase_emitter.note_response_start,
+                    on_response_end=phase_emitter.note_response_end,
+                ),
             ])
 
         pipeline_components.append(output_activity_tracker)

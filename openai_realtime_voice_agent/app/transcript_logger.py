@@ -38,6 +38,7 @@ from pipecat.frames.frames import (
     Frame,
     TTSTextFrame,
     LLMTextFrame,
+    LLMFullResponseStartFrame,
     LLMFullResponseEndFrame,
     TranscriptionFrame,
 )
@@ -54,10 +55,13 @@ class TranscriptLogger(FrameProcessor):
             the LLM), "user" (TranscriptionFrame, place BEFORE the LLM), or "both".
     """
 
-    def __init__(self, capture: str = "both", on_assistant_reply=None, **kwargs):
+    def __init__(self, capture: str = "both", on_assistant_reply=None,
+                 on_response_start=None, on_response_end=None, **kwargs):
         super().__init__(**kwargs)
         self._capture = capture
         self._on_assistant_reply = on_assistant_reply
+        self._on_response_start = on_response_start
+        self._on_response_end = on_response_end
         self._assistant_buf: list[str] = []
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -70,6 +74,9 @@ class TranscriptLogger(FrameProcessor):
             if isinstance(frame, (TTSTextFrame, LLMTextFrame)):
                 if frame.text:
                     self._assistant_buf.append(frame.text)
+            elif isinstance(frame, LLMFullResponseStartFrame):
+                if self._on_response_start is not None:
+                    self._on_response_start()
             elif isinstance(frame, LLMFullResponseEndFrame):
                 text = "".join(self._assistant_buf).strip()
                 self._assistant_buf = []
@@ -77,6 +84,8 @@ class TranscriptLogger(FrameProcessor):
                     logger.info(f"🤖 assistant: {text}")
                     if self._on_assistant_reply is not None:
                         self._on_assistant_reply(text)
+                if self._on_response_end is not None:
+                    self._on_response_end()
 
         if self._capture in ("user", "both"):
             if isinstance(frame, TranscriptionFrame):
