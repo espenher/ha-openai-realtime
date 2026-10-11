@@ -1,8 +1,10 @@
 """Main application entry point using Pipecat."""
 import os
 import sys
+import json
 import asyncio
 import logging
+import aiohttp
 from typing import Optional
 import dotenv
 from pipecat.pipeline.pipeline import Pipeline
@@ -795,6 +797,8 @@ class Application:
             openai_service_getter=get_openai_service_for_client
         )
         
+        announce_task = asyncio.create_task(self._announce_listener())
+
         try:
             # Start the pipeline runner - this will start the WebSocket server
             # Based on pipecat-examples: PipelineRunner.run() starts the transport server
@@ -806,8 +810,58 @@ class Application:
             logger.error(f"Fatal error: {e}", exc_info=True)
             raise
         finally:
+            announce_task.cancel()
             await self.cleanup()
-    
+
+    async def _announce_listener(self) -> None:
+        """Speak Home Assistant's `jarvis_announce` events on the device.
+
+        An automation fires the event with `message` in its data; the assistant
+        then says it in its own voice. Subscribing to HA's event bus over the
+        core websocket (SUPERVISOR_TOKEN) needs no HA-side configuration.
+        """
+        token = os.environ.get("SUPERVISOR_TOKEN")
+        if not token:
+            logger.info("📣 No SUPERVISOR_TOKEN; jarvis_announce events disabled")
+            return
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect("ws://supervisor/core/websocket", heartbeat=30) as ws:
+                        await ws.receive_json()  # auth_required
+                        await ws.send_json({"type": "auth", "access_token": token})
+                        reply = await ws.receive_json()
+                        if reply.get("type") != "auth_ok":
+                            raise RuntimeError(f"HA auth failed: {reply.get('type')}")
+                        await ws.send_json({"id": 1, "type": "subscribe_events", "event_type": "jarvis_announce"})
+                        logger.info("📣 Listening for jarvis_announce events")
+                        async for msg in ws:
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                continue
+                            data = json.loads(msg.data)
+                            if data.get("type") != "event":
+                                continue
+                            message = ((data.get("event") or {}).get("data") or {}).get("message")
+                            if message and self.websocket_handler is not None:
+                                asyncio.create_task(self._announce(str(message)))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"📣 jarvis_announce listener stopped ({e!r}); retrying in 10 s")
+            await asyncio.sleep(10)
+
+    async def _announce(self, message: str) -> None:
+        announce = getattr(self.websocket_handler, "announce", None)
+        if announce is None:
+            logger.warning("📣 announcement dropped: pipeline not ready")
+            return
+        try:
+            result = await announce(message)
+        except Exception as e:
+            result = f"failed ({e!r})"
+        if result != "ok":
+            logger.warning(f"📣 announcement not spoken: {result}")
+
     async def cleanup(self) -> None:
         """Cleanup resources."""
         logger.info("Cleaning up application...")

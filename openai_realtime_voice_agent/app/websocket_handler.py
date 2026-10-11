@@ -614,6 +614,9 @@ class WebSocketHandler:
         # on_real_speech, and {"type":"wake"}) — and a legitimate next turn needs
         # the user to actually speak — so it can never cancel a real turn.
         _kill_next_response = {"v": False}
+        # Set while an announcement (see _announce) is being spoken, so the
+        # interrupt / late-audio kill machinery doesn't cancel it.
+        _announcing = {"v": False}
 
         async def _on_device_interrupt():
             # The device closed its mic; speech reported before the next wake is late audio.
@@ -639,6 +642,11 @@ class WebSocketHandler:
 
         @openai_service.event_handler("on_conversation_item_created")
         async def _kill_racing_response(service, item_id, item):
+            # The reply to an announcement is wanted, whatever came before it.
+            if _announcing["v"]:
+                if getattr(item, "role", None) == "assistant":
+                    _announcing["v"] = False
+                return
             # Late audio after the device closed its mic: cancel whatever the
             # model makes of it, a spoken reply or a tool call alike.
             if STALE_AUDIO.active and (
@@ -710,6 +718,7 @@ class WebSocketHandler:
             # response (handled in PhaseEmitter via the kill-window callbacks).
             phase_emitter.note_wake()
             phase_emitter.note_device_mic_opened()
+            _announcing["v"] = False
             # New turn boundary: drop any pending post-tool kill so it can't
             # leak onto this fresh turn's response.
             _kill_next_response["v"] = False
@@ -731,6 +740,46 @@ class WebSocketHandler:
             logger.info("🧽 late audio → input_audio_buffer.clear")
 
         phase_emitter.set_stale_speech_handler(_on_stale_speech)
+
+        async def _announce(message: str) -> str:
+            """Have the assistant say `message` out loud, unprompted, in its own
+            voice and words (e.g. "the washing machine is done"). Waits up to a
+            minute for a conversation in progress to finish."""
+            if not self._websockets:
+                return "no device connected"
+            for _ in range(60):
+                if phase_emitter._current in (None, "idle"):
+                    break
+                await asyncio.sleep(1)
+            else:
+                return "busy"
+            _announcing["v"] = True
+            # Nobody woke the device, so speech the VAD reports now isn't a request.
+            phase_emitter.note_device_mic_closed()
+            # The device drops incoming audio after a stop until it sees
+            # `listening`; `replying` right after gates its mic again.
+            await self.broadcast_phase("listening")
+            await self.broadcast_phase("replying")
+            item = openai_rt_events.ConversationItem(
+                type="message",
+                role="system",
+                content=[openai_rt_events.ItemContent(
+                    type="input_text",
+                    text=(
+                        "Home Assistant notification. Nobody spoke to you; announce this "
+                        "to Espen now, unprompted, in one or two short sentences, in "
+                        f"character. Don't ask a question. Notification: {message}"
+                    ),
+                )],
+            )
+            await openai_service.send_client_event(openai_rt_events.ConversationItemCreateEvent(item=item))
+            await openai_service.send_client_event(openai_rt_events.ResponseCreateEvent(
+                response=openai_rt_events.ResponseProperties(tool_choice="none")
+            ))
+            logger.info(f"📣 announcement: {message[:120]}")
+            return "ok"
+
+        self.announce = _announce
 
         phase_emitter.set_kill_window_handlers(
             on_dangling=lambda: _interrupt_kill_until.__setitem__(
