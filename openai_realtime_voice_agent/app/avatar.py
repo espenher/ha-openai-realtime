@@ -11,8 +11,9 @@ streams what the page needs to animate:
   {"type": "env", "dt": 0.02, "values": [...]}       loudness of the reply audio,
                                                       one value per 20 ms, for lip-sync
 
-Files live in the add-on's own storage (/data/avatar, uploaded with
-PUT /files/<name>), with Home Assistant's media folder as a read-only fallback.
+Files live in Home Assistant's media folder under avatar/ (uploaded with
+PUT /files/<name>, or copied in over Samba). Files from older versions, which
+kept them in the add-on's own storage, are moved there on start.
 
 Nothing here touches the device path: the tap copies loudness off audio frames
 that are on their way to the Voice PE anyway, and every send is fire-and-forget.
@@ -25,6 +26,7 @@ import json
 import logging
 import math
 import pathlib
+import shutil
 from array import array
 
 from aiohttp import WSMsgType, web
@@ -34,8 +36,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
-UPLOAD_DIR = pathlib.Path("/data/avatar")
-MEDIA_DIRS = (UPLOAD_DIR, pathlib.Path("/media/avatar"), pathlib.Path("/media"))
+UPLOAD_DIR = pathlib.Path("/media/avatar")
+OLD_UPLOAD_DIR = pathlib.Path("/data/avatar")
+MEDIA_DIRS = (UPLOAD_DIR, pathlib.Path("/media"))
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_SUFFIXES = {".vrm", ".fbx", ".vrma", ".glb", ".png", ".jpg", ".jpeg"}
 ENVELOPE_STEP_S = 0.02
@@ -50,6 +53,7 @@ class AvatarHub:
 
     # ---------- server ----------
     async def start(self, port: int) -> None:
+        await asyncio.to_thread(self._move_old_uploads)
         app = web.Application(client_max_size=MAX_UPLOAD_BYTES)
         app.router.add_get("/", self._index)
         app.router.add_get("/files", self._list_files)
@@ -63,6 +67,29 @@ class AvatarHub:
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", port).start()
         logger.info(f"🧍 Avatar page on port {port} (models from {self._media_dir()})")
+
+    @staticmethod
+    def _move_old_uploads() -> None:
+        """Move files from the add-on's own storage (used before 0.6.0-q22) into media/avatar."""
+        if not OLD_UPLOAD_DIR.is_dir():
+            return
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        for old in OLD_UPLOAD_DIR.iterdir():
+            new = UPLOAD_DIR / old.name
+            if not old.is_file() or old.name.endswith(".part"):
+                continue
+            if new.exists():
+                logger.warning(f"🧍 Not moving {old.name}: media/avatar already has a file with that name")
+                continue
+            tmp = new.with_name(new.name + ".part")
+            try:
+                shutil.copyfile(old, tmp)
+                tmp.replace(new)
+                old.unlink()
+                logger.info(f"🧍 Moved avatar file {old.name} to media/avatar")
+            except OSError as e:
+                tmp.unlink(missing_ok=True)
+                logger.warning(f"🧍 Could not move {old.name} to media/avatar: {e!r}")
 
     @staticmethod
     def _media_dir() -> pathlib.Path:

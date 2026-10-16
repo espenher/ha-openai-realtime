@@ -10,10 +10,11 @@ init: false
 startup: application
 boot: auto
 host_network: true
-# The avatar page reads .vrm/.fbx files from Home Assistant's media folder.
+# The avatar page keeps its models, animations, textures and room layout in
+# Home Assistant's media folder (media/avatar), so they can be managed over Samba.
 map:
   - type: media
-    read_only: true
+    read_only: false
 # Gives the add-on SUPERVISOR_TOKEN so it can reach Home Assistant (used as a
 # fallback auth token for the MCP server when longlived_token is left blank).
 homeassistant_api: true
