@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assistant avatar</title>
+<style>
+  :root { --bg: #111317; --text: #e8e8ea; --muted: #8f96a3; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+               font: 14px system-ui, sans-serif; overflow: hidden; cursor: none; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100vw !important; height: 100vh !important; }
+  #status { position: fixed; left: 12px; bottom: 10px; color: var(--muted); font-size: 12px;
+            opacity: .7; transition: opacity .6s; pointer-events: none; }
+  #status.hidden { opacity: 0; }
+  #debug { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,.6); padding: 8px 10px;
+           border-radius: 8px; font: 12px ui-monospace, monospace; white-space: pre; display: none; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="status">Connecting…</div>
+<div id="debug"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.3.3/lib/three-vrm.module.min.js"
+} }
+</script>
+<script type="module">
+// Shows the active persona's VRM model and animates it from the add-on's
+// websocket: phase → animation, reply loudness → mouth, wake → greeting move.
+// URL options: ?lola=File.vrm&jarvis=Other.vrm (model per persona name),
+// ?lola_style=female&jarvis_style=male (prefer animations tagged _female/_male),
+// ?delay=450 (ms the mouth waits so it lines up with the Voice PE's speaker),
+// ?debug=1. Press "d" to toggle the debug overlay.
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+
+const params = new URLSearchParams(location.search);
+const MOUTH_DELAY = Number(params.get('delay') ?? 450) / 1000;
+const statusEl = document.getElementById('status');
+const debugEl = document.getElementById('debug');
+let debugOn = params.get('debug') === '1';
+addEventListener('keydown', e => { if (e.key === 'd') debugOn = !debugOn; });
+const setStatus = (text, fade = false) => {
+  statusEl.textContent = text;
+  statusEl.classList.toggle('hidden', fade);
+};
+
+// ---------- scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById('stage').appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111317);
+const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 20);
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(1, 2, 2);
+scene.add(sun);
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- Mixamo → VRM retargeting ----------
+const mixamoRig = {
+  mixamorigHips: 'hips', mixamorigSpine: 'spine', mixamorigSpine1: 'chest', mixamorigSpine2: 'upperChest',
+  mixamorigNeck: 'neck', mixamorigHead: 'head',
+  mixamorigLeftShoulder: 'leftShoulder', mixamorigLeftArm: 'leftUpperArm', mixamorigLeftForeArm: 'leftLowerArm', mixamorigLeftHand: 'leftHand',
+  mixamorigRightShoulder: 'rightShoulder', mixamorigRightArm: 'rightUpperArm', mixamorigRightForeArm: 'rightLowerArm', mixamorigRightHand: 'rightHand',
+  mixamorigLeftUpLeg: 'leftUpperLeg', mixamorigLeftLeg: 'leftLowerLeg', mixamorigLeftFoot: 'leftFoot', mixamorigLeftToeBase: 'leftToes',
+  mixamorigRightUpLeg: 'rightUpperLeg', mixamorigRightLeg: 'rightLowerLeg', mixamorigRightFoot: 'rightFoot', mixamorigRightToeBase: 'rightToes',
+};
+for (const side of ['Left', 'Right']) {
+  const s = side.toLowerCase();
+  mixamoRig[`mixamorig${side}HandThumb1`] = `${s}ThumbMetacarpal`;
+  mixamoRig[`mixamorig${side}HandThumb2`] = `${s}ThumbProximal`;
+  mixamoRig[`mixamorig${side}HandThumb3`] = `${s}ThumbDistal`;
+  for (const [mix, v] of [['Index', 'Index'], ['Middle', 'Middle'], ['Ring', 'Ring'], ['Pinky', 'Little']]) {
+    mixamoRig[`mixamorig${side}Hand${mix}1`] = `${s}${v}Proximal`;
+    mixamoRig[`mixamorig${side}Hand${mix}2`] = `${s}${v}Intermediate`;
+    mixamoRig[`mixamorig${side}Hand${mix}3`] = `${s}${v}Distal`;
+  }
+}
+
+function retarget(asset, vrm) {
+  const clip = THREE.AnimationClip.findByName(asset.animations, 'mixamo.com');
+  const tracks = [];
+  const restInv = new THREE.Quaternion(), parentRest = new THREE.Quaternion(), q = new THREE.Quaternion(), v = new THREE.Vector3();
+  const motionHipsHeight = asset.getObjectByName('mixamorigHips').position.y;
+  const vrmHipsY = vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(v).y;
+  const vrmRootY = vrm.scene.getWorldPosition(v).y;
+  const hipsScale = Math.abs(vrmHipsY - vrmRootY) / motionHipsHeight;
+  const vrm0 = vrm.meta?.metaVersion === '0';
+  for (const track of clip.tracks) {
+    const [rigName, property] = track.name.split('.');
+    const node = vrm.humanoid.getNormalizedBoneNode(mixamoRig[rigName]);
+    const rigNode = asset.getObjectByName(rigName);
+    if (!node || !rigNode) continue;
+    rigNode.getWorldQuaternion(restInv).invert();
+    rigNode.parent.getWorldQuaternion(parentRest);
+    if (track instanceof THREE.QuaternionKeyframeTrack) {
+      const values = track.values.slice();
+      for (let i = 0; i < values.length; i += 4) q.fromArray(values, i).premultiply(parentRest).multiply(restInv).toArray(values, i);
+      tracks.push(new THREE.QuaternionKeyframeTrack(`${node.name}.${property}`, track.times,
+        values.map((x, i) => (vrm0 && i % 2 === 0 ? -x : x))));
+    } else if (track instanceof THREE.VectorKeyframeTrack && rigName === 'mixamorigHips') {
+      // Keep the character on its spot: hips may bob up and down, but sideways
+      // and forward drift is pinned to the first frame so it never walks out of view.
+      const x0 = track.values[0], z0 = track.values[2];
+      tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.${property}`, track.times,
+        track.values.map((x, i) => {
+          const axis = i % 3;
+          const pinned = axis === 0 ? x0 : axis === 2 ? z0 : x;
+          return (vrm0 && axis !== 1 ? -pinned : pinned) * hipsScale;
+        })));
+    }
+  }
+  return new THREE.AnimationClip(clip.name, clip.duration, tracks);
+}
+
+// ---------- characters ----------
+// One entry per loaded model: { vrm, mixer, actions: Map(name → action), current, headY }
+const characters = new Map();     // file name → character
+let personaModels = {};           // persona name (lower case) → file name
+let active = null;                // the visible character
+let activePersona = null;
+const gltf = new GLTFLoader();
+gltf.register(parser => new VRMLoaderPlugin(parser));
+const fbx = new FBXLoader();
+const ONE_SHOT = /bow|wave|greet|shrug|nod|thank|reject|forehead|taunt/i;
+// Animation variants per character: "Talking_female" vs "Talking_male".
+const STYLE_DEFAULTS = { lola: 'female', jarvis: 'male' };
+const tagged = (name, tag) => new RegExp(`(^|[_ -])${tag}($|[_ .-])`, 'i').test(name);
+const anyStyle = name => tagged(name, 'female') || tagged(name, 'male');
+
+async function loadCharacter(file, animations) {
+  const g = await gltf.loadAsync(`files/${encodeURIComponent(file)}`);
+  const vrm = g.userData.vrm;
+  VRMUtils.rotateVRM0(vrm);
+  vrm.scene.visible = false;
+  scene.add(vrm.scene);
+  vrm.scene.updateMatrixWorld(true);
+  const head = vrm.humanoid.getNormalizedBoneNode('head');
+  const ch = { vrm, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
+               headY: head ? head.getWorldPosition(new THREE.Vector3()).y : 1.5 };
+  for (const [name, asset] of animations) {
+    try {
+      const action = ch.mixer.clipAction(retarget(asset, vrm));
+      if (ONE_SHOT.test(name)) { action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; }
+      ch.actions.set(name, action);
+    } catch (e) { console.warn('animation', name, e); }
+  }
+  ch.mixer.addEventListener('finished', e => {
+    if (e.action === ch.actions.get(ch.current)) playFor(ch, phaseAnimation(lastPhase));
+  });
+  return ch;
+}
+
+// Best match for a pattern: this character's style first, then untagged, then anything.
+function find(ch, re) {
+  const names = [...ch.actions.keys()].filter(n => re.test(n));
+  return (ch.style && names.find(n => tagged(n, ch.style)))
+      || names.find(n => !anyStyle(n))
+      || names[0];
+}
+function play(ch, name, fade = 0.5) {
+  const next = name && ch.actions.get(name);
+  if (!next || name === ch.current) return;
+  const prev = ch.current && ch.actions.get(ch.current);
+  next.reset().setEffectiveWeight(1).fadeIn(fade).play();
+  if (prev) prev.fadeOut(fade);
+  ch.current = name;
+}
+// Phase → which kind of animation; resolved per model by file name.
+function phaseAnimation(phase) {
+  if (phase === 'replying') return /talk|explain/i;
+  if (phase === 'thinking') return /think|ponder|look/i;
+  return /idle/i;
+}
+function playFor(ch, pattern) {
+  const busy = ch.current && ONE_SHOT.test(ch.current) && ch.actions.get(ch.current)?.isRunning();
+  if (busy) return;
+  play(ch, find(ch, pattern) || find(ch, /idle/i));
+}
+
+function frame(ch) {
+  const h = ch.headY;
+  camera.position.set(0, h * 0.82, h * 1.55);
+  camera.lookAt(0, h * 0.72, 0);
+}
+
+function modelFor(persona) {
+  const key = (persona || '').toLowerCase();
+  return personaModels[key] || personaModels.__default;
+}
+
+function showPersona(persona) {
+  activePersona = persona;
+  const ch = characters.get(modelFor(persona));
+  if (!ch) return;
+  const key = (persona || '').toLowerCase();
+  ch.style = params.get(`${key}_style`) || STYLE_DEFAULTS[key] || null;
+  if (ch === active) return;
+  if (active) active.vrm.scene.visible = false;
+  active = ch;
+  active.vrm.scene.visible = true;
+  frame(active);
+  playFor(active, phaseAnimation(lastPhase));
+}
+
+async function boot() {
+  setStatus('Loading models…');
+  const files = await (await fetch('files')).json();
+  const vrms = files.filter(f => /\.vrm$/i.test(f));
+  const fbxs = files.filter(f => /\.fbx$/i.test(f));
+  if (!vrms.length) { setStatus('No .vrm files found. Upload them in Home Assistant: Media → My media → avatar'); return; }
+
+  // Persona → model: ?<persona>=File.vrm, else a file whose name contains the persona name.
+  for (const [k, v] of params) if (/\.vrm$/i.test(v)) personaModels[k.toLowerCase()] = v;
+  personaModels.__default = vrms[0];
+
+  const animations = [];
+  for (const f of fbxs) {
+    try {
+      const asset = await fbx.loadAsync(`files/${encodeURIComponent(f)}`);
+      if (THREE.AnimationClip.findByName(asset.animations, 'mixamo.com')) animations.push([f.replace(/\.fbx$/i, ''), asset]);
+    } catch (e) { console.warn('fbx', f, e); }
+  }
+  for (const f of vrms) {
+    try { characters.set(f, await loadCharacter(f, animations)); }
+    catch (e) { console.warn('vrm', f, e); }
+  }
+  setStatus(`${characters.size} model(s), ${animations.length} animation(s). Waiting for the assistant…`);
+  connect();
+}
+
+// Name-based fallback once we know a persona name.
+function guessModel(persona) {
+  const key = (persona || '').toLowerCase();
+  if (personaModels[key]) return;
+  const hit = [...characters.keys()].find(f => f.toLowerCase().includes(key));
+  if (hit) personaModels[key] = hit;
+}
+
+// ---------- live data ----------
+let lastPhase = 'idle';
+const envelope = [];      // { t (seconds, performance clock), v }
+let envCursor = 0;        // time where the next envelope value starts
+let mouth = 0;
+
+function onMessage(msg) {
+  const now = performance.now() / 1000;
+  switch (msg.type) {
+    case 'state':
+      lastPhase = msg.phase || 'idle';
+      if (msg.persona) { guessModel(msg.persona); showPersona(msg.persona); }
+      setStatus(`${msg.persona || ''} connected`, true);
+      break;
+    case 'persona':
+      guessModel(msg.value); showPersona(msg.value);
+      break;
+    case 'phase':
+      lastPhase = msg.value;
+      if (active) playFor(active, phaseAnimation(msg.value));
+      break;
+    case 'wake':
+      if (active) { const greet = find(active, /bow|wave|greet/i); if (greet) play(active, greet, 0.3); }
+      break;
+    case 'interrupt':
+      envelope.length = 0;
+      break;
+    case 'env': {
+      // Audio arrives faster than real time; lay the values out on a timeline
+      // that starts MOUTH_DELAY after the first chunk of a reply.
+      if (envCursor < now) envCursor = now + MOUTH_DELAY;
+      for (const v of msg.values) { envelope.push({ t: envCursor, v }); envCursor += msg.dt; }
+      break;
+    }
+  }
+}
+
+function connect() {
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  ws.onmessage = e => { try { onMessage(JSON.parse(e.data)); } catch {} };
+  ws.onclose = () => { setStatus('Reconnecting…'); setTimeout(connect, 3000); };
+}
+
+// ---------- loop ----------
+const clock = new THREE.Clock();
+let nextBlink = 2, blinkT = -1;
+renderer.setAnimationLoop(() => {
+  const dt = clock.getDelta();
+  const now = performance.now() / 1000;
+  while (envelope.length && envelope[0].t + 0.02 < now) envelope.shift();
+  const target = envelope.length && envelope[0].t <= now ? Math.min(1, envelope[0].v * 6) : 0;
+  mouth += (target - mouth) * (target > mouth ? 0.55 : 0.25);
+
+  for (const ch of characters.values()) {
+    if (!ch.vrm.scene.visible) continue;
+    ch.mixer.update(dt);
+    const em = ch.vrm.expressionManager;
+    em?.setValue('aa', mouth);
+    nextBlink -= dt;
+    if (nextBlink <= 0 && blinkT < 0) { blinkT = 0; nextBlink = 2 + Math.random() * 4; }
+    if (blinkT >= 0) {
+      blinkT += dt;
+      em?.setValue('blink', Math.sin(Math.min(blinkT / 0.15, 1) * Math.PI));
+      if (blinkT > 0.15) { blinkT = -1; em?.setValue('blink', 0); }
+    }
+    ch.vrm.update(dt);
+  }
+  if (debugOn) {
+    debugEl.style.display = 'block';
+    debugEl.textContent = `persona  ${activePersona}\nmodel    ${active ? [...characters].find(([, c]) => c === active)?.[0] : '-'}\nphase    ${lastPhase}\nanim     ${active?.current}\nmouth    ${mouth.toFixed(2)}\nqueued   ${envelope.length}`;
+  } else debugEl.style.display = 'none';
+  renderer.render(scene, camera);
+});
+
+boot().catch(e => setStatus(`Failed to start: ${e.message}`));
+</script>
+</body>
+</html>

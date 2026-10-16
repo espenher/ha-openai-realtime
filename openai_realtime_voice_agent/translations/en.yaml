@@ -275,6 +275,13 @@ configuration:
     description: >-
       0.7–1.2, 1.0 = normal. Slightly below 1 sounds more relaxed.
       Empty = normal speed.
+  avatar_port:
+    name: "🧍 Avatar · Page port"
+    description: >-
+      Open http://<home assistant>:<port> on a screen to show a 3D character
+      that animates and lip-syncs with the assistant. Put the .vrm models and
+      Mixamo .fbx animations in Home Assistant's media folder (Media → My
+      media, ideally a folder named "avatar"). 0 turns the page off.
   second_persona_wake_word:
     name: "👥 Persona · Second persona wake word"
     description: >-

@@ -22,6 +22,7 @@ from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
 from app.phase_emitter import PhaseEmitter, STALE_AUDIO
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
+from app.avatar import HUB as AVATAR, AvatarTap
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)
@@ -550,6 +551,9 @@ class WebSocketHandler:
         if output_recorder:
             pipeline_components.append(output_recorder)
 
+        # Loudness of the reply audio for the avatar page (no-op without viewers).
+        pipeline_components.append(AvatarTap())
+
         pipeline_components.append(transport.output())
         
         # Add context initializer if we have cached messages
@@ -642,6 +646,7 @@ class WebSocketHandler:
         _announcing = {"v": False}
 
         async def _on_device_interrupt():
+            AVATAR.send({"type": "interrupt"})
             # The device closed its mic; speech reported before the next wake is late audio.
             phase_emitter.note_device_mic_closed()
             _interrupt_kill_until["t"] = time.monotonic() + INTERRUPT_KILL_WINDOW_S
@@ -736,6 +741,7 @@ class WebSocketHandler:
                 logger.debug(f"🧽 mic-flush input clear no-op ({e!r})")
 
         async def _on_device_wake():
+            AVATAR.send({"type": "wake"})
             # va_client sends {"type":"wake"} on every wake (start_session). Mark
             # the turn boundary for the dangling-VAD guard (A): until the user
             # actually speaks, a server-VAD end-of-turn is a stale pre-wake
@@ -806,6 +812,7 @@ class WebSocketHandler:
 
         self.announce = _announce
 
+        AVATAR.send({"type": "persona", "value": PERSONA.main_name})
         main_instructions = openai_service._session_properties.instructions
         switch_lock = asyncio.Lock()
 
@@ -832,6 +839,7 @@ class WebSocketHandler:
                 session=openai_rt_events.SessionProperties(instructions=instructions, output_modalities=modalities)
             ))
             logger.info(f"👥 wake word → {name}")
+            AVATAR.send({"type": "persona", "value": name})
             return True
 
         self.quick_switch_persona = _quick_switch_persona
@@ -853,6 +861,7 @@ class WebSocketHandler:
                 PERSONA_STATE.active = target
                 name = PERSONA.second_name if target == SECOND else PERSONA.main_name
                 logger.info(f"👥 switching persona -> {name}")
+                AVATAR.send({"type": "persona", "value": name})
                 # A fresh session: the new persona doesn't inherit the other's
                 # conversation, and session.created re-sends the settings above.
                 await openai_service.reset_conversation()
@@ -966,6 +975,7 @@ class WebSocketHandler:
         # think are connected (was debug).
         logger.info(f"➡️ broadcast phase '{value}' to {len(self._websockets)} device(s)")
         await self.broadcast_json({"type": "phase", "value": value})
+        AVATAR.send({"type": "phase", "value": value})
     
     def setup_event_handlers(
         self,

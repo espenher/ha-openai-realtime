@@ -15,6 +15,7 @@ from pipecat.transports.websocket.server import WebsocketServerTransport
 from app.mcp_service import HomeAssistantMCPService
 from app.phase_emitter import TURN_LIVENESS, STALE_AUDIO
 from app.persona import CONFIG as PERSONA, SECOND as PERSONA_SECOND
+from app.avatar import HUB as AVATAR
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
 from app.web_search_tool import get_web_search_tool_definition, create_web_search_tool_handler
 from app.audio_recording_service import AudioRecordingService
@@ -799,6 +800,17 @@ class Application:
         )
         
         announce_task = asyncio.create_task(self._announce_listener())
+
+        # Avatar page (3D character that animates with the assistant). 0 = off.
+        try:
+            avatar_port = int(os.environ.get("AVATAR_PORT", "8081"))
+        except ValueError:
+            avatar_port = 8081
+        if avatar_port:
+            try:
+                await AVATAR.start(avatar_port)
+            except Exception as e:
+                logger.warning(f"🧍 Avatar page could not start on port {avatar_port}: {e!r}")
 
         try:
             # Start the pipeline runner - this will start the WebSocket server
