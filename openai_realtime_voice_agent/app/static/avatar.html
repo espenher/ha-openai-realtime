@@ -236,11 +236,15 @@ async function loadCharacter(file, animations) {
   const g = await vrmLoader.loadAsync(`files/${encodeURIComponent(file)}`);
   const vrm = g.userData.vrm;
   VRMUtils.rotateVRM0(vrm);
-  vrm.scene.visible = false;
-  scene.add(vrm.scene);
-  vrm.scene.updateMatrixWorld(true);
+  // The model sits in its own holder: placing and turning the holder leaves
+  // the model's own rotation alone (VRM 0.x models are turned 180° inside).
+  const root = new THREE.Group();
+  root.add(vrm.scene);
+  root.visible = false;
+  scene.add(root);
+  root.updateMatrixWorld(true);
   const head = vrm.humanoid.getNormalizedBoneNode('head');
-  const ch = { vrm, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
+  const ch = { vrm, root, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
                headY: head ? head.getWorldPosition(new THREE.Vector3()).y : 1.5, style: null };
   for (const [name, asset] of animations) {
     try {
@@ -292,9 +296,9 @@ function showPersona(persona) {
   const key = (persona || '').toLowerCase();
   ch.style = params.get(`${key}_style`) || STYLE_DEFAULTS[key] || null;
   if (ch !== active) {
-    if (active) active.vrm.scene.visible = false;
+    if (active) active.root.visible = false;
     active = ch;
-    active.vrm.scene.visible = true;
+    active.root.visible = true;
   }
   placeCharacter();
   if (!editing) applyViewCamera();
@@ -393,8 +397,11 @@ const homeSpot = () => (layout.spots || []).find(s => s.type === 'home') || (lay
 function placeCharacter() {
   if (!active) return;
   const spot = homeSpot();
-  active.vrm.scene.position.fromArray(spot?.position || [0, 0, 0]);
-  active.vrm.scene.rotation.y = spot?.rotationY || 0;
+  active.root.position.fromArray(spot?.position || [0, 0, 0]);
+  active.root.rotation.y = spot?.rotationY || 0;
+  // Let hair and skirt start from rest at the new place instead of whipping across.
+  active.root.updateMatrixWorld(true);
+  active.vrm.springBoneManager?.reset();
 }
 
 function applyViewCamera() {
@@ -402,7 +409,7 @@ function applyViewCamera() {
     camera.position.fromArray(layout.camera.position);
     camera.lookAt(new THREE.Vector3().fromArray(layout.camera.target));
   } else if (active) {
-    const p = active.vrm.scene.position, h = active.headY;
+    const p = active.root.position, h = active.headY;
     camera.position.set(p.x, p.y + h * 0.82, p.z + h * 1.55);
     camera.lookAt(p.x, p.y + h * 0.72, p.z);
   }
@@ -433,7 +440,7 @@ function setEditing(on) {
   orbit.enabled = on;
   spotsGroup.visible = on;
   if (on) {
-    const target = layout.camera?.target || (active ? toArr(active.vrm.scene.position.clone().add(new THREE.Vector3(0, active.headY * 0.6, 0))) : [0, 1, 0]);
+    const target = layout.camera?.target || (active ? toArr(active.root.position.clone().add(new THREE.Vector3(0, active.headY * 0.6, 0))) : [0, 1, 0]);
     orbit.target.fromArray(target);
     orbit.update();
     refreshFiles();
@@ -681,7 +688,7 @@ renderer.setAnimationLoop(() => {
   roomMixer?.update(dt);
   if (editing) orbit.update();
   for (const ch of characters.values()) {
-    if (!ch.vrm.scene.visible) continue;
+    if (!ch.root.visible) continue;
     ch.mixer.update(dt);
     const em = ch.vrm.expressionManager;
     em?.setValue('aa', mouth);
