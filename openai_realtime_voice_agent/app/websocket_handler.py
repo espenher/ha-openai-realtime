@@ -489,37 +489,15 @@ class WebSocketHandler:
         # aggregator can consume it) — opposite directions, so they need taps on
         # opposite sides of the service (see transcript_logger.py): "user" before
         # the LLM, "assistant" after it.
-        if context_aggregator:
-            pipeline_components.extend([
-                context_aggregator.user(),
-                TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
-                openai_service,
-                TranscriptLogger(
-                    capture="assistant",
-                    on_assistant_reply=phase_emitter.note_assistant_reply,
-                    on_response_start=phase_emitter.note_response_start,
-                    on_response_end=phase_emitter.note_response_end,
-                ),
-                context_aggregator.assistant(),
-            ])
-        else:
-            pipeline_components.extend([
-                TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
-                openai_service,
-                TranscriptLogger(
-                    capture="assistant",
-                    on_assistant_reply=phase_emitter.note_assistant_reply,
-                    on_response_start=phase_emitter.note_response_start,
-                    on_response_end=phase_emitter.note_response_end,
-                ),
-            ])
-
         # Second persona: an ElevenLabs voice speaks the realtime model's text.
         # Only in the pipeline when it is configured; the gate keeps it silent
-        # while the main persona (the realtime model's own voice) is active.
+        # while the main persona (the realtime model's own voice) is active. It
+        # must sit BEFORE the assistant context aggregator, which consumes the
+        # text frames.
+        tts_components = []
         if PERSONA.second_available:
             from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-            pipeline_components.extend([
+            tts_components = [
                 TtsGate(),
                 ElevenLabsTTSService(
                     api_key=PERSONA.elevenlabs_api_key,
@@ -527,8 +505,31 @@ class WebSocketHandler:
                     model=PERSONA.elevenlabs_model,
                     sample_rate=24000,
                 ),
-            ])
+            ]
             logger.info(f"👥 Second persona '{PERSONA.second_name}' available (ElevenLabs {PERSONA.elevenlabs_model})")
+
+        assistant_tap = TranscriptLogger(
+            capture="assistant",
+            on_assistant_reply=phase_emitter.note_assistant_reply,
+            on_response_start=phase_emitter.note_response_start,
+            on_response_end=phase_emitter.note_response_end,
+        )
+        if context_aggregator:
+            pipeline_components.extend([
+                context_aggregator.user(),
+                TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
+                openai_service,
+                assistant_tap,
+                *tts_components,
+                context_aggregator.assistant(),
+            ])
+        else:
+            pipeline_components.extend([
+                TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
+                openai_service,
+                assistant_tap,
+                *tts_components,
+            ])
 
         pipeline_components.append(output_activity_tracker)
 
