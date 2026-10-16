@@ -72,6 +72,26 @@ export MAX_CONTEXT_MESSAGES
 export TRANSCRIPTION_MODEL
 export ENABLE_RECORDING
 
+# --- 👥 Second persona --- (optional values only exported when set; bashio
+# prints "null" for unset optionals)
+MAIN_PERSONA_NAME=$(bashio::config 'main_persona_name')
+SECOND_PERSONA_NAME=$(bashio::config 'second_persona_name')
+ELEVENLABS_MODEL=$(bashio::config 'elevenlabs_model')
+PERSONA_ENTITY=$(bashio::config 'persona_entity')
+export MAIN_PERSONA_NAME SECOND_PERSONA_NAME ELEVENLABS_MODEL PERSONA_ENTITY
+if bashio::config.has_value 'second_persona_instructions'; then
+    SECOND_PERSONA_INSTRUCTIONS=$(bashio::config 'second_persona_instructions')
+    export SECOND_PERSONA_INSTRUCTIONS
+fi
+if bashio::config.has_value 'elevenlabs_api_key'; then
+    ELEVENLABS_API_KEY=$(bashio::config 'elevenlabs_api_key')
+    export ELEVENLABS_API_KEY
+fi
+if bashio::config.has_value 'elevenlabs_voice_id'; then
+    ELEVENLABS_VOICE_ID=$(bashio::config 'elevenlabs_voice_id')
+    export ELEVENLABS_VOICE_ID
+fi
+
 # The *_custom escape hatches (🗣️/🌐/⚙️) are optional WITHOUT defaults —
 # bashio::config prints "null" for unset optionals, and main.py's
 # _resolve_choice would treat that literal string as a real custom value.

@@ -222,6 +222,44 @@ configuration:
       Only with server_vad. How long a silence ends your question (default
       800). Raise it if you get cut off while pausing.
 
+  # --- 👥 Second persona ---
+  main_persona_name:
+    name: "👥 Persona · Main persona name"
+    description: >-
+      Name of the assistant configured above (its option in the persona
+      selector). It speaks with the OpenAI voice.
+  second_persona_name:
+    name: "👥 Persona · Second persona name"
+    description: >-
+      Name of the second assistant, exactly as it appears as an option in
+      the persona selector.
+  second_persona_instructions:
+    name: "👥 Persona · Second persona personality (system prompt)"
+    description: >-
+      The second assistant's own system prompt. It uses the same tools as
+      the main one. Leave empty to disable the second persona.
+  elevenlabs_api_key:
+    name: "👥 Persona · ElevenLabs API key"
+    description: >-
+      Needs text-to-speech permission. Used only while the second persona
+      is active.
+  elevenlabs_voice_id:
+    name: "👥 Persona · ElevenLabs voice ID"
+    description: >-
+      The voice the second persona speaks with (copy it from the voice's
+      page in ElevenLabs).
+  elevenlabs_model:
+    name: "👥 Persona · ElevenLabs model"
+    description: >-
+      eleven_flash_v2_5 is the fastest to start speaking. Others, such as
+      eleven_turbo_v2_5 or eleven_multilingual_v2, also work.
+  persona_entity:
+    name: "👥 Persona · Persona selector entity"
+    description: >-
+      An input_select whose options are the two persona names. Changing it
+      switches the assistant (it waits for a conversation to finish, then
+      the new persona says hello).
+
   # --- 🔍 Debug ---
   enable_recording:
     name: "🔍 Debug · Record audio"

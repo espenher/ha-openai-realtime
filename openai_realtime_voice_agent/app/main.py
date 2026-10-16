@@ -14,6 +14,7 @@ from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 from pipecat.transports.websocket.server import WebsocketServerTransport
 from app.mcp_service import HomeAssistantMCPService
 from app.phase_emitter import TURN_LIVENESS, STALE_AUDIO
+from app.persona import CONFIG as PERSONA
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
 from app.web_search_tool import get_web_search_tool_definition, create_web_search_tool_handler
 from app.audio_recording_service import AudioRecordingService
@@ -835,11 +836,25 @@ class Application:
                             raise RuntimeError(f"HA auth failed: {reply.get('type')}")
                         await ws.send_json({"id": 1, "type": "subscribe_events", "event_type": "jarvis_announce"})
                         logger.info("📣 Listening for jarvis_announce events")
+                        if PERSONA.second_available:
+                            await ws.send_json({
+                                "id": 2,
+                                "type": "subscribe_trigger",
+                                "trigger": {"platform": "state", "entity_id": PERSONA.entity_id},
+                            })
+                            asyncio.create_task(self._apply_initial_persona(token))
                         async for msg in ws:
                             if msg.type != aiohttp.WSMsgType.TEXT:
                                 continue
                             data = json.loads(msg.data)
                             if data.get("type") != "event":
+                                continue
+                            if data.get("id") == 2:
+                                variables = (data.get("event") or {}).get("variables") or {}
+                                to_state = (variables.get("trigger") or {}).get("to_state") or {}
+                                switch = getattr(self.websocket_handler, "switch_persona", None)
+                                if to_state.get("state") and switch is not None:
+                                    asyncio.create_task(switch(to_state["state"]))
                                 continue
                             message = ((data.get("event") or {}).get("data") or {}).get("message")
                             if message and self.websocket_handler is not None:
@@ -849,6 +864,29 @@ class Application:
             except Exception as e:
                 logger.warning(f"📣 jarvis_announce listener stopped ({e!r}); retrying in 10 s")
             await asyncio.sleep(10)
+
+    async def _apply_initial_persona(self, token: str) -> None:
+        """At startup, take over whichever persona the input_select shows (silently)."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"http://supervisor/core/api/states/{PERSONA.entity_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.info(f"👥 {PERSONA.entity_id} not found; {PERSONA.main_name} stays active")
+                        return
+                    option = (await resp.json()).get("state")
+            # Wait for the realtime session to be up before replacing it.
+            for _ in range(60):
+                if getattr(self.openai_service, "_api_session_ready", False):
+                    break
+                await asyncio.sleep(0.5)
+            switch = getattr(self.websocket_handler, "switch_persona", None)
+            if switch is not None and option:
+                await switch(option, greet=False)
+        except Exception as e:
+            logger.warning(f"👥 could not read the persona selector: {e!r}")
 
     async def _announce(self, message: str) -> None:
         announce = getattr(self.websocket_handler, "announce", None)

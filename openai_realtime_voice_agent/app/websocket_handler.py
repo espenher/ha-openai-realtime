@@ -21,6 +21,7 @@ from app.raw_audio_serializer import RawAudioSerializer
 from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
 from app.phase_emitter import PhaseEmitter, STALE_AUDIO
+from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)
@@ -513,6 +514,22 @@ class WebSocketHandler:
                 ),
             ])
 
+        # Second persona: an ElevenLabs voice speaks the realtime model's text.
+        # Only in the pipeline when it is configured; the gate keeps it silent
+        # while the main persona (the realtime model's own voice) is active.
+        if PERSONA.second_available:
+            from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+            pipeline_components.extend([
+                TtsGate(),
+                ElevenLabsTTSService(
+                    api_key=PERSONA.elevenlabs_api_key,
+                    voice_id=PERSONA.elevenlabs_voice_id,
+                    model=PERSONA.elevenlabs_model,
+                    sample_rate=24000,
+                ),
+            ])
+            logger.info(f"👥 Second persona '{PERSONA.second_name}' available (ElevenLabs {PERSONA.elevenlabs_model})")
+
         pipeline_components.append(output_activity_tracker)
 
         # Emit va_client phase messages (listening/thinking/replying/idle) to
@@ -782,6 +799,47 @@ class WebSocketHandler:
             return "ok"
 
         self.announce = _announce
+
+        main_instructions = openai_service._session_properties.instructions
+        main_modalities = openai_service._session_properties.output_modalities
+        switch_lock = asyncio.Lock()
+
+        async def _switch_persona(option: str, greet: bool = True) -> None:
+            """Make the persona named by the input_select option active."""
+            target = PERSONA.persona_for_option(option)
+            async with switch_lock:
+                if target == PERSONA_STATE.active:
+                    return
+                # Let a conversation in progress (e.g. the "switch to ..." request
+                # itself) finish before the session is replaced.
+                for _ in range(60):
+                    if phase_emitter._current in (None, "idle"):
+                        break
+                    await asyncio.sleep(1)
+                props = openai_service._session_properties
+                if target == SECOND:
+                    props.instructions = PERSONA.second_instructions
+                    props.output_modalities = ["text"]
+                else:
+                    props.instructions = main_instructions
+                    props.output_modalities = main_modalities
+                PERSONA_STATE.active = target
+                name = PERSONA.second_name if target == SECOND else PERSONA.main_name
+                logger.info(f"👥 switching persona -> {name}")
+                # A fresh session: the new persona doesn't inherit the other's
+                # conversation, and session.created re-sends the settings above.
+                await openai_service.reset_conversation()
+                for _ in range(40):
+                    if getattr(openai_service, "_api_session_ready", False):
+                        break
+                    await asyncio.sleep(0.25)
+            if greet:
+                await _announce(
+                    f"You ({name}) have just been switched on as the voice assistant. "
+                    "Greet Espen in one short sentence."
+                )
+
+        self.switch_persona = _switch_persona
 
         # The dangling-VAD guard can misfire: if OpenAI's VAD was still "in
         # speech" from before the wake, the user's real question closes that

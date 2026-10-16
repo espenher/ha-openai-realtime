@@ -72,6 +72,8 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
     BotStartedSpeakingFrame,
     BotStoppedSpeakingFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
 )
 from pipecat.processors.frame_processor import FrameProcessor, FrameDirection
 
@@ -196,6 +198,10 @@ class PhaseEmitter(FrameProcessor):
         # until the next wake. Speech the VAD reports meanwhile is stale.
         self._device_mic_closed = False
         self._on_stale_speech = None
+        # Between TTSStarted and TTSStopped audio is still being produced. For
+        # the ElevenLabs persona the LLM text finishes long before the speech,
+        # so a gap between sentences must not end the turn.
+        self._tts_active = False
 
     def note_device_mic_closed(self) -> None:
         """The device closed its mic (interrupt or follow-up timeout)."""
@@ -226,7 +232,9 @@ class PhaseEmitter(FrameProcessor):
         """True when nothing more will be said this turn: the last response
         has finished, no new one has started, and no tool ran during it (a tool
         call means OpenAI will follow up with another response)."""
+        from app.persona import STATE  # late import: persona imports pipecat frames too
         return (self._reply_done and not self._response_open
+                and not (STATE.speaks_with_tts and self._tts_active)
                 and TURN_LIVENESS.in_flight == 0
                 and TURN_LIVENESS.started == self._tools_at_response_start)
 
@@ -423,6 +431,10 @@ class PhaseEmitter(FrameProcessor):
             else:
                 await self._emit("thinking")
                 self._arm_watchdog()
+        elif isinstance(frame, TTSStartedFrame):
+            self._tts_active = True
+        elif isinstance(frame, TTSStoppedFrame):
+            self._tts_active = False
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._suppress_thinking = False
             self._cancel_pending_idle()
