@@ -11,6 +11,9 @@ streams what the page needs to animate:
   {"type": "env", "dt": 0.02, "values": [...]}       loudness of the reply audio,
                                                       one value per 20 ms, for lip-sync
 
+Files live in the add-on's own storage (/data/avatar, uploaded with
+PUT /files/<name>), with Home Assistant's media folder as a read-only fallback.
+
 Nothing here touches the device path: the tap copies loudness off audio frames
 that are on their way to the Voice PE anyway, and every send is fire-and-forget.
 """
@@ -30,7 +33,9 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
-MEDIA_DIRS = (pathlib.Path("/media/avatar"), pathlib.Path("/media"))
+UPLOAD_DIR = pathlib.Path("/data/avatar")
+MEDIA_DIRS = (UPLOAD_DIR, pathlib.Path("/media/avatar"), pathlib.Path("/media"))
+MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_SUFFIXES = {".vrm", ".fbx", ".vrma", ".glb"}
 ENVELOPE_STEP_S = 0.02
 
@@ -44,10 +49,12 @@ class AvatarHub:
 
     # ---------- server ----------
     async def start(self, port: int) -> None:
-        app = web.Application()
+        app = web.Application(client_max_size=MAX_UPLOAD_BYTES)
         app.router.add_get("/", self._index)
         app.router.add_get("/files", self._list_files)
         app.router.add_get("/files/{name}", self._file)
+        app.router.add_put("/files/{name}", self._upload)
+        app.router.add_delete("/files/{name}", self._delete)
         app.router.add_get("/ws", self._ws)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
@@ -56,10 +63,40 @@ class AvatarHub:
 
     @staticmethod
     def _media_dir() -> pathlib.Path:
+        """The first folder that actually holds model files."""
         for directory in MEDIA_DIRS:
-            if directory.is_dir():
+            if directory.is_dir() and any(p.suffix.lower() in ALLOWED_SUFFIXES for p in directory.iterdir()):
                 return directory
-        return MEDIA_DIRS[-1]
+        return UPLOAD_DIR
+
+    @staticmethod
+    def _upload_path(name: str) -> pathlib.Path:
+        path = UPLOAD_DIR / name
+        if path.parent != UPLOAD_DIR or path.suffix.lower() not in ALLOWED_SUFFIXES or name.startswith("."):
+            raise web.HTTPBadRequest(text="Only .vrm, .fbx, .vrma and .glb files can be uploaded.")
+        return path
+
+    async def _upload(self, request: web.Request) -> web.Response:
+        path = self._upload_path(request.match_info["name"])
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".part")
+        size = 0
+        with tmp.open("wb") as out:
+            async for chunk in request.content.iter_chunked(1 << 16):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    out.close()
+                    tmp.unlink(missing_ok=True)
+                    raise web.HTTPRequestEntityTooLarge(max_size=MAX_UPLOAD_BYTES, actual_size=size)
+                out.write(chunk)
+        tmp.replace(path)
+        logger.info(f"🧍 Avatar file uploaded: {path.name} ({size // 1024} KB)")
+        return web.json_response({"name": path.name, "bytes": size})
+
+    async def _delete(self, request: web.Request) -> web.Response:
+        path = self._upload_path(request.match_info["name"])
+        path.unlink(missing_ok=True)
+        return web.json_response({"deleted": path.name})
 
     async def _index(self, request: web.Request) -> web.StreamResponse:
         return web.FileResponse(STATIC_DIR / "avatar.html", headers={"Cache-Control": "no-cache"})

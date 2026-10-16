@@ -279,9 +279,10 @@ configuration:
     name: "🧍 Avatar · Page port"
     description: >-
       Open http://<home assistant>:<port> on a screen to show a 3D character
-      that animates and lip-syncs with the assistant. Put the .vrm models and
-      Mixamo .fbx animations in Home Assistant's media folder (Media → My
-      media, ideally a folder named "avatar"). 0 turns the page off.
+      that animates and lip-syncs with the assistant. Upload the .vrm models
+      and Mixamo .fbx animations with an HTTP PUT to /files/<name> on that
+      port (they are kept in the add-on's own storage); files in Home
+      Assistant's media folder are used as a fallback. 0 turns the page off.
   second_persona_wake_word:
     name: "👥 Persona · Second persona wake word"
     description: >-
