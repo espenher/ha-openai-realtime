@@ -322,7 +322,7 @@ function findGarments(ch) {
   ch.shrinkMeshes = [];
   ch.vrm.scene.traverse(o => {
     const m = /^Outfit_([A-Za-z]+?)\d*$/.exec(o.name);
-    if (m && !/underwear/i.test(m[1])) {
+    if (m) {
       if (!ch.garments.has(m[1])) ch.garments.set(m[1], []);
       ch.garments.get(m[1]).push(o);
     }
