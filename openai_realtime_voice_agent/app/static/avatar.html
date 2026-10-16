@@ -29,6 +29,8 @@
   #editor p { margin: 0; color: var(--muted); font-size: 12px; }
   .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .row > select, .row > input[type=text], .row > input[type=number] { flex: 1; min-width: 0; }
+  #wardrobe label { display: flex; gap: 5px; align-items: center; background: #2b2f38; border: 1px solid var(--line);
+                    border-radius: 6px; padding: 4px 8px; cursor: pointer; }
   button, select, input, label.btn { background: #2b2f38; color: var(--text); border: 1px solid var(--line);
            border-radius: 6px; padding: 6px 8px; font: inherit; }
   button, label.btn { cursor: pointer; }
@@ -69,6 +71,9 @@
     </div>
     <div class="row"><select id="spotAnim"></select></div>
   </div>
+
+  <h2>Wardrobe</h2>
+  <div class="row" id="wardrobe"><p>No separate clothing parts on this model.</p></div>
 
   <h2>Room</h2>
   <div class="row"><select id="roomFile"></select></div>
@@ -244,7 +249,7 @@ async function loadCharacter(file, animations) {
   scene.add(root);
   root.updateMatrixWorld(true);
   const head = vrm.humanoid.getNormalizedBoneNode('head');
-  const ch = { vrm, root, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
+  const ch = { file, vrm, root, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
                headY: head ? head.getWorldPosition(new THREE.Vector3()).y : 1.5, style: null };
   for (const [name, asset] of animations) {
     try {
@@ -253,6 +258,7 @@ async function loadCharacter(file, animations) {
       ch.actions.set(name, action);
     } catch (e) { console.warn('animation', name, e); }
   }
+  findGarments(ch);
   ch.mixer.addEventListener('finished', e => {
     if (e.action === ch.actions.get(ch.current)) playFor(ch, phaseAnimation(lastPhase));
   });
@@ -301,8 +307,59 @@ function showPersona(persona) {
     active.root.visible = true;
   }
   placeCharacter();
-  if (!editing) applyViewCamera();
+  if (!editing) applyViewCamera(); else buildWardrobeUI();
   playFor(active, phaseAnimation(lastPhase));
+}
+
+// ---------- wardrobe ----------
+// Clothing is the model's "Outfit_*" parts (Tie1 + Tie2 count as one "Tie").
+// Underwear is never offered: it always stays on. While a garment is worn,
+// the body's matching "shrink" shape keys pull the skin in under it so it
+// doesn't poke through; they go back to 0 when the garment comes off.
+const SHRINK_UNDER = { Jacket: ['UpperArm', 'Elbow', 'LowerArm'], Shirt: ['Chest', 'Spine'], Sneaker: ['Foot', 'Toe'] };
+function findGarments(ch) {
+  ch.garments = new Map();
+  ch.shrinkMeshes = [];
+  ch.vrm.scene.traverse(o => {
+    const m = /^Outfit_([A-Za-z]+?)\d*$/.exec(o.name);
+    if (m && !/underwear/i.test(m[1])) {
+      if (!ch.garments.has(m[1])) ch.garments.set(m[1], []);
+      ch.garments.get(m[1]).push(o);
+    }
+    const dict = o.isMesh && o.morphTargetDictionary;
+    if (dict && 'Hip' in dict && 'UpperLeg' in dict && 'Chest' in dict) ch.shrinkMeshes.push(o);
+  });
+}
+const wardrobeOf = ch => ((layout.wardrobe ??= {})[ch.file] ??= {});
+function applyWardrobe(ch) {
+  const worn = wardrobeOf(ch);
+  const shrink = new Set();
+  for (const [name, parts] of ch.garments) {
+    const on = worn[name] !== false;
+    for (const part of parts) part.visible = on;
+    if (on) for (const key of SHRINK_UNDER[name] || []) shrink.add(key);
+  }
+  for (const mesh of ch.shrinkMeshes) {
+    for (const key of Object.values(SHRINK_UNDER).flat()) {
+      const i = mesh.morphTargetDictionary[key];
+      if (i !== undefined) mesh.morphTargetInfluences[i] = shrink.has(key) ? 1 : 0;
+    }
+  }
+}
+function buildWardrobeUI() {
+  const box = $('wardrobe');
+  box.innerHTML = '';
+  if (!active?.garments?.size) { box.innerHTML = '<p>No separate clothing parts on this model.</p>'; return; }
+  const worn = wardrobeOf(active);
+  for (const name of active.garments.keys()) {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = worn[name] !== false;
+    cb.onchange = () => { worn[name] = cb.checked; applyWardrobe(active); };
+    label.append(cb, name);
+    box.appendChild(label);
+  }
 }
 
 // ---------- room, furniture, spots ----------
@@ -420,6 +477,7 @@ async function loadLayout() {
   await loadRoom();
   await loadItems();
   loadSpots();
+  for (const ch of characters.values()) applyWardrobe(ch);
   placeCharacter();
   if (!editing) applyViewCamera();
 }
@@ -444,6 +502,7 @@ function setEditing(on) {
     orbit.target.fromArray(target);
     orbit.update();
     refreshFiles();
+    buildWardrobeUI();
   } else {
     select(null);
     applyViewCamera();
