@@ -37,7 +37,7 @@ STATIC_DIR = pathlib.Path(__file__).parent / "static"
 UPLOAD_DIR = pathlib.Path("/data/avatar")
 MEDIA_DIRS = (UPLOAD_DIR, pathlib.Path("/media/avatar"), pathlib.Path("/media"))
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
-ALLOWED_SUFFIXES = {".vrm", ".fbx", ".vrma", ".glb"}
+ALLOWED_SUFFIXES = {".vrm", ".fbx", ".vrma", ".glb", ".png", ".jpg", ".jpeg"}
 ENVELOPE_STEP_S = 0.02
 
 
@@ -76,7 +76,7 @@ class AvatarHub:
     def _upload_path(name: str) -> pathlib.Path:
         path = UPLOAD_DIR / name
         if path.parent != UPLOAD_DIR or path.suffix.lower() not in ALLOWED_SUFFIXES or name.startswith("."):
-            raise web.HTTPBadRequest(text="Only .vrm, .fbx, .vrma and .glb files can be uploaded.")
+            raise web.HTTPBadRequest(text="Only .vrm, .fbx, .vrma, .glb and image files can be uploaded.")
         return path
 
     async def _upload(self, request: web.Request) -> web.Response:

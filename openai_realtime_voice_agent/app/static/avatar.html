@@ -29,6 +29,12 @@
   #editor p { margin: 0; color: var(--muted); font-size: 12px; }
   .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .row > select, .row > input[type=text], .row > input[type=number] { flex: 1; min-width: 0; }
+  .slot { display: flex; flex-direction: column; gap: 4px; }
+  .slot span { color: var(--muted); font-size: 12px; }
+  .swatches { display: flex; flex-wrap: wrap; gap: 5px; }
+  .swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid #1b1d22; padding: 0;
+            box-shadow: 0 0 0 1px var(--line); cursor: pointer; }
+  .swatch.on { box-shadow: 0 0 0 2px var(--accent); }
   #wardrobe label { display: flex; gap: 5px; align-items: center; background: #2b2f38; border: 1px solid var(--line);
                     border-radius: 6px; padding: 4px 8px; cursor: pointer; }
   button, select, input, label.btn { background: #2b2f38; color: var(--text); border: 1px solid var(--line);
@@ -74,6 +80,8 @@
 
   <h2>Wardrobe</h2>
   <div class="row" id="wardrobe"><p>No separate clothing parts on this model.</p></div>
+  <h2>Appearance</h2>
+  <div id="appearance" style="display:flex; flex-direction:column; gap:8px"><p>No colour variants uploaded for this model.</p></div>
 
   <h2>Room</h2>
   <div class="row"><select id="roomFile"></select></div>
@@ -309,7 +317,7 @@ function showPersona(persona) {
     active.root.visible = true;
   }
   placeCharacter();
-  if (!editing) applyViewCamera(); else buildWardrobeUI();
+  if (!editing) applyViewCamera(); else { buildWardrobeUI(); buildAppearanceUI(); }
   playFor(active, phaseAnimation(lastPhase));
 }
 
@@ -363,6 +371,96 @@ function buildWardrobeUI() {
     cb.onchange = () => { worn[name] = cb.checked; applyWardrobe(active); };
     label.append(cb, name);
     box.appendChild(label);
+  }
+}
+
+// ---------- appearance (colour variants) ----------
+// Variant textures are uploaded as "<Model>__<TextureName>__<order>-<Label>_<rrggbb>.png",
+// e.g. "Nabu__Hair_BaseColor__04-Hair4_9c92d9.png". Picking one replaces the
+// model's texture of that name wherever it is used; the hex is the swatch colour.
+// "Original" (or nothing chosen) keeps the texture built into the model.
+const SLOT_LABELS = { Hair_BaseColor: 'Hair', Body_BaseColor: 'Eyes', Outfit2_BaseColor: 'Jacket & shoes' };
+const VARIANT_RE = /^(.+?)__(.+?)__(\d+)-(.+)_([0-9a-f]{6})\.(png|jpe?g)$/i;
+function variantsFor(ch) {
+  const base = ch.file.replace(/\.vrm$/i, '');
+  const slots = new Map();
+  for (const f of files) {
+    const m = VARIANT_RE.exec(f);
+    if (!m || m[1] !== base) continue;
+    if (!slots.has(m[2])) slots.set(m[2], []);
+    slots.get(m[2]).push({ file: f, order: Number(m[3]), label: m[4], color: `#${m[5]}` });
+  }
+  for (const list of slots.values()) list.sort((a, b) => a.order - b.order);
+  return slots;
+}
+const appearanceOf = ch => ((layout.appearance ??= {})[ch.file] ??= {});
+const TEXTURE_KEYS = ['map', 'shadeMultiplyTexture'];
+const variantImages = new Map();
+const texLoader = new THREE.TextureLoader();
+const loadVariantImage = file => {
+  if (!variantImages.has(file)) variantImages.set(file, texLoader.loadAsync(`files/${encodeURIComponent(file)}`).then(t => t.image));
+  return variantImages.get(file);
+};
+function forEachTextureSlot(ch, slot, fn) {
+  ch.vrm.scene.traverse(o => {
+    if (!o.isMesh) return;
+    for (const m of [].concat(o.material)) for (const key of TEXTURE_KEYS) if (m[key]?.name === slot) fn(m, key);
+  });
+}
+async function setTexture(ch, slot, file) {
+  ch.originalTextures ??= new Map();
+  ch.variantTextures ??= new Map();
+  if (!ch.originalTextures.has(slot)) forEachTextureSlot(ch, slot, (m, key) => {
+    if (!ch.originalTextures.has(slot)) ch.originalTextures.set(slot, m[key]);
+  });
+  const original = ch.originalTextures.get(slot);
+  if (!original) return;
+  let texture = original;
+  if (file) {
+    texture = ch.variantTextures.get(file);
+    if (!texture) {
+      const image = await loadVariantImage(file);
+      texture = original.clone();          // keeps the model's flip, colour space and wrapping
+      texture.image = image;
+      texture.needsUpdate = true;
+      ch.variantTextures.set(file, texture);
+    }
+  }
+  forEachTextureSlot(ch, slot, (m, key) => { m[key] = texture; m.needsUpdate = true; });
+}
+function applyAppearance(ch) {
+  const chosen = appearanceOf(ch);
+  for (const slot of variantsFor(ch).keys()) setTexture(ch, slot, chosen[slot] || null).catch(e => console.warn('appearance', slot, e));
+}
+function buildAppearanceUI() {
+  const box = $('appearance');
+  box.innerHTML = '';
+  const slots = active ? variantsFor(active) : new Map();
+  if (!slots.size) { box.innerHTML = '<p>No colour variants uploaded for this model.</p>'; return; }
+  const chosen = appearanceOf(active);
+  for (const [slot, variants] of slots) {
+    const wrap = document.createElement('div');
+    wrap.className = 'slot';
+    const title = document.createElement('span');
+    title.textContent = SLOT_LABELS[slot] || slot;
+    const row = document.createElement('div');
+    row.className = 'swatches';
+    for (const v of variants) {
+      const b = document.createElement('button');
+      b.className = 'swatch';
+      b.title = v.label;
+      b.style.background = v.color;
+      const isOriginal = /^original$/i.test(v.label);
+      b.classList.toggle('on', chosen[slot] ? chosen[slot] === v.file : isOriginal);
+      b.onclick = async () => {
+        if (isOriginal) delete chosen[slot]; else chosen[slot] = v.file;
+        row.querySelectorAll('.swatch').forEach(x => x.classList.toggle('on', x === b));
+        await setTexture(active, slot, isOriginal ? null : v.file);
+      };
+      row.appendChild(b);
+    }
+    wrap.append(title, row);
+    box.appendChild(wrap);
   }
 }
 
@@ -481,7 +579,7 @@ async function loadLayout() {
   await loadRoom();
   await loadItems();
   loadSpots();
-  for (const ch of characters.values()) applyWardrobe(ch);
+  for (const ch of characters.values()) { applyWardrobe(ch); applyAppearance(ch); }
   placeCharacter();
   if (!editing) applyViewCamera();
 }
@@ -507,6 +605,7 @@ function setEditing(on) {
     orbit.update();
     refreshFiles();
     buildWardrobeUI();
+    buildAppearanceUI();
   } else {
     select(null);
     applyViewCamera();
