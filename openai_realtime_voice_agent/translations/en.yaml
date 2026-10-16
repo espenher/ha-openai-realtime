@@ -260,6 +260,21 @@ configuration:
       switches the assistant (it waits for a conversation to finish, then
       the new persona says hello).
 
+  elevenlabs_stability:
+    name: "👥 Persona · Voice stability"
+    description: >-
+      0–1. Higher = calmer and more even, lower = more expressive and
+      sing-song. Around 0.7 is relaxed. Empty = the voice's own setting.
+  elevenlabs_style:
+    name: "👥 Persona · Voice style exaggeration"
+    description: >-
+      0–1. Extra dramatic delivery; 0 keeps it natural. Empty = the
+      voice's own setting.
+  elevenlabs_speed:
+    name: "👥 Persona · Voice speed"
+    description: >-
+      0.7–1.2, 1.0 = normal. Slightly below 1 sounds more relaxed.
+      Empty = normal speed.
   second_persona_wake_word:
     name: "👥 Persona · Second persona wake word"
     description: >-

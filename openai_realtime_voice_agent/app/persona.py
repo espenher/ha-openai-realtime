@@ -32,6 +32,13 @@ def _env(name: str, default: str = "") -> str:
     return default if value in (None, "", "null") else value.strip()
 
 
+def _float_env(name: str) -> float | None:
+    try:
+        return float(_env(name)) if _env(name) else None
+    except ValueError:
+        return None
+
+
 @dataclass
 class PersonaConfig:
     main_name: str
@@ -42,6 +49,10 @@ class PersonaConfig:
     elevenlabs_model: str
     entity_id: str
     second_wake_word: str
+    # ElevenLabs voice settings; None = the voice's own defaults.
+    stability: float | None = None
+    style: float | None = None
+    speed: float | None = None
 
     @property
     def second_available(self) -> bool:
@@ -58,6 +69,9 @@ class PersonaConfig:
             elevenlabs_model=_env("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
             entity_id=_env("PERSONA_ENTITY", "input_select.voice_assistant"),
             second_wake_word=_env("SECOND_PERSONA_WAKE_WORD", "Okay Nabu"),
+            stability=_float_env("ELEVENLABS_STABILITY"),
+            style=_float_env("ELEVENLABS_STYLE"),
+            speed=_float_env("ELEVENLABS_SPEED"),
         )
 
     def persona_for_option(self, option: str | None) -> str:

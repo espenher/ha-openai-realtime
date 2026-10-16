@@ -88,6 +88,11 @@ if bashio::config.has_value 'elevenlabs_api_key'; then
     ELEVENLABS_API_KEY=$(bashio::config 'elevenlabs_api_key')
     export ELEVENLABS_API_KEY
 fi
+for opt in elevenlabs_stability elevenlabs_style elevenlabs_speed; do
+    if bashio::config.has_value "$opt"; then
+        export "${opt^^}=$(bashio::config "$opt")"
+    fi
+done
 if bashio::config.has_value 'elevenlabs_voice_id'; then
     ELEVENLABS_VOICE_ID=$(bashio::config 'elevenlabs_voice_id')
     export ELEVENLABS_VOICE_ID

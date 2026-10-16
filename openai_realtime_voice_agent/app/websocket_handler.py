@@ -504,6 +504,11 @@ class WebSocketHandler:
                     voice_id=PERSONA.elevenlabs_voice_id,
                     model=PERSONA.elevenlabs_model,
                     sample_rate=24000,
+                    params=ElevenLabsTTSService.InputParams(
+                        stability=PERSONA.stability,
+                        style=PERSONA.style,
+                        speed=PERSONA.speed,
+                    ),
                 ),
             ]
             logger.info(f"👥 Second persona '{PERSONA.second_name}' available (ElevenLabs {PERSONA.elevenlabs_model})")
