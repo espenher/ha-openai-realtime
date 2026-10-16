@@ -260,6 +260,14 @@ configuration:
       switches the assistant (it waits for a conversation to finish, then
       the new persona says hello).
 
+  second_persona_wake_word:
+    name: "👥 Persona · Second persona wake word"
+    description: >-
+      Waking the device with this word makes the second persona answer;
+      any other wake word brings back the main one. Needs the firmware to
+      report the wake word (esphome.voice_wake event). Leave empty to
+      switch only with the selector.
+
   # --- 🔍 Debug ---
   enable_recording:
     name: "🔍 Debug · Record audio"

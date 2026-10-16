@@ -801,8 +801,34 @@ class WebSocketHandler:
         self.announce = _announce
 
         main_instructions = openai_service._session_properties.instructions
-        main_modalities = openai_service._session_properties.output_modalities
         switch_lock = asyncio.Lock()
+
+        def _persona_settings(target: str) -> tuple[str, list[str]]:
+            if target == SECOND:
+                return PERSONA.second_instructions, ["text"]
+            return main_instructions, ["audio"]
+
+        async def _quick_switch_persona(target: str) -> bool:
+            """Swap persona at a wake word, without a new session or a greeting.
+
+            Runs while the user is about to speak, so it only sends a minimal
+            session.update (instructions + output modality): the turn detection
+            and audio buffer are left alone. Returns True if anything changed.
+            """
+            if target == PERSONA_STATE.active:
+                return False
+            instructions, modalities = _persona_settings(target)
+            props = openai_service._session_properties
+            props.instructions, props.output_modalities = instructions, modalities
+            PERSONA_STATE.active = target
+            name = PERSONA.second_name if target == SECOND else PERSONA.main_name
+            await openai_service.send_client_event(openai_rt_events.SessionUpdateEvent(
+                session=openai_rt_events.SessionProperties(instructions=instructions, output_modalities=modalities)
+            ))
+            logger.info(f"👥 wake word → {name}")
+            return True
+
+        self.quick_switch_persona = _quick_switch_persona
 
         async def _switch_persona(option: str, greet: bool = True) -> None:
             """Make the persona named by the input_select option active."""
@@ -817,12 +843,7 @@ class WebSocketHandler:
                         break
                     await asyncio.sleep(1)
                 props = openai_service._session_properties
-                if target == SECOND:
-                    props.instructions = PERSONA.second_instructions
-                    props.output_modalities = ["text"]
-                else:
-                    props.instructions = main_instructions
-                    props.output_modalities = main_modalities
+                props.instructions, props.output_modalities = _persona_settings(target)
                 PERSONA_STATE.active = target
                 name = PERSONA.second_name if target == SECOND else PERSONA.main_name
                 logger.info(f"👥 switching persona -> {name}")

@@ -14,7 +14,7 @@ from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 from pipecat.transports.websocket.server import WebsocketServerTransport
 from app.mcp_service import HomeAssistantMCPService
 from app.phase_emitter import TURN_LIVENESS, STALE_AUDIO
-from app.persona import CONFIG as PERSONA
+from app.persona import CONFIG as PERSONA, SECOND as PERSONA_SECOND
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
 from app.web_search_tool import get_web_search_tool_definition, create_web_search_tool_handler
 from app.audio_recording_service import AudioRecordingService
@@ -842,12 +842,18 @@ class Application:
                                 "type": "subscribe_trigger",
                                 "trigger": {"platform": "state", "entity_id": PERSONA.entity_id},
                             })
+                            await ws.send_json({"id": 3, "type": "subscribe_events", "event_type": "esphome.voice_wake"})
                             asyncio.create_task(self._apply_initial_persona(token))
                         async for msg in ws:
                             if msg.type != aiohttp.WSMsgType.TEXT:
                                 continue
                             data = json.loads(msg.data)
                             if data.get("type") != "event":
+                                continue
+                            if data.get("id") == 3:
+                                wake_word = ((data.get("event") or {}).get("data") or {}).get("wake_word")
+                                if wake_word:
+                                    asyncio.create_task(self._wake_switch(str(wake_word), token))
                                 continue
                             if data.get("id") == 2:
                                 variables = (data.get("event") or {}).get("variables") or {}
@@ -864,6 +870,27 @@ class Application:
             except Exception as e:
                 logger.warning(f"📣 jarvis_announce listener stopped ({e!r}); retrying in 10 s")
             await asyncio.sleep(10)
+
+    async def _wake_switch(self, wake_word: str, token: str) -> None:
+        """The device heard a wake word: let the persona it belongs to answer."""
+        quick = getattr(self.websocket_handler, "quick_switch_persona", None)
+        if quick is None:
+            return
+        target = PERSONA.persona_for_wake_word(wake_word)
+        try:
+            if not await quick(target):
+                return
+            # Keep the selector in Home Assistant in step (its state trigger
+            # then finds the persona already active and does nothing).
+            option = PERSONA.second_name if target == PERSONA_SECOND else PERSONA.main_name
+            async with aiohttp.ClientSession() as session:
+                await session.post(
+                    "http://supervisor/core/api/services/input_select/select_option",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"entity_id": PERSONA.entity_id, "option": option},
+                )
+        except Exception as e:
+            logger.warning(f"👥 wake-word switch failed: {e!r}")
 
     async def _apply_initial_persona(self, token: str) -> None:
         """At startup, take over whichever persona the input_select shows (silently)."""

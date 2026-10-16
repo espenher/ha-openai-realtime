@@ -41,6 +41,7 @@ class PersonaConfig:
     elevenlabs_voice_id: str
     elevenlabs_model: str
     entity_id: str
+    second_wake_word: str
 
     @property
     def second_available(self) -> bool:
@@ -56,11 +57,20 @@ class PersonaConfig:
             elevenlabs_voice_id=_env("ELEVENLABS_VOICE_ID"),
             elevenlabs_model=_env("ELEVENLABS_MODEL", "eleven_flash_v2_5"),
             entity_id=_env("PERSONA_ENTITY", "input_select.voice_assistant"),
+            second_wake_word=_env("SECOND_PERSONA_WAKE_WORD", "Okay Nabu"),
         )
 
     def persona_for_option(self, option: str | None) -> str:
         """Map the input_select's option to MAIN/SECOND (unknown → MAIN)."""
         if option and self.second_available and option.strip().lower() == self.second_name.lower():
+            return SECOND
+        return MAIN
+
+    def persona_for_wake_word(self, wake_word: str) -> str:
+        """Which persona a wake word calls: the configured one → SECOND, any other → MAIN."""
+        def norm(text: str) -> str:
+            return "".join(ch for ch in text.lower() if ch.isalnum())
+        if self.second_available and self.second_wake_word and norm(wake_word) == norm(self.second_wake_word):
             return SECOND
         return MAIN
 
