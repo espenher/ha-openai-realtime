@@ -379,7 +379,7 @@ function buildWardrobeUI() {
 // e.g. "Nabu__Hair_BaseColor__04-Hair4_9c92d9.png". Picking one replaces the
 // model's texture of that name wherever it is used; the hex is the swatch colour.
 // "Original" (or nothing chosen) keeps the texture built into the model.
-const SLOT_LABELS = { Hair_BaseColor: 'Hair', Body_BaseColor: 'Eyes', Outfit2_BaseColor: 'Jacket & shoes' };
+const SLOT_LABELS = { Hair_BaseColor: 'Hair', Body_BaseColor: 'Eyes', Outfit2_BaseColor: 'Jacket & shoes', Outfit1_BaseColor: 'Underwear' };
 const VARIANT_RE = /^(.+?)__(.+?)__(\d+)-(.+)_([0-9a-f]{6})\.(png|jpe?g)$/i;
 function variantsFor(ch) {
   const base = ch.file.replace(/\.vrm$/i, '');
