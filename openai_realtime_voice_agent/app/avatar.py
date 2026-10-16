@@ -21,6 +21,7 @@ that are on their way to the Voice PE anyway, and every send is fire-and-forget.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import pathlib
@@ -55,6 +56,8 @@ class AvatarHub:
         app.router.add_get("/files/{name}", self._file)
         app.router.add_put("/files/{name}", self._upload)
         app.router.add_delete("/files/{name}", self._delete)
+        app.router.add_get("/layout", self._get_layout)
+        app.router.add_put("/layout", self._put_layout)
         app.router.add_get("/ws", self._ws)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
@@ -113,6 +116,30 @@ class AvatarHub:
         if path.parent != directory or path.suffix.lower() not in ALLOWED_SUFFIXES or not path.is_file():
             raise web.HTTPNotFound()
         return web.FileResponse(path)
+
+    # The room layout (placed furniture, edited room objects, spots, camera),
+    # written by the page's edit mode. Kept next to the uploaded files.
+    async def _get_layout(self, request: web.Request) -> web.Response:
+        path = UPLOAD_DIR / "layout.json"
+        if not path.is_file():
+            return web.json_response({})
+        return web.Response(text=path.read_text(encoding="utf-8"), content_type="application/json",
+                            headers={"Cache-Control": "no-cache"})
+
+    async def _put_layout(self, request: web.Request) -> web.Response:
+        try:
+            layout = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="Layout must be JSON.")
+        if not isinstance(layout, dict):
+            raise web.HTTPBadRequest(text="Layout must be a JSON object.")
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = UPLOAD_DIR / "layout.json.part"
+        tmp.write_text(json.dumps(layout, indent=1), encoding="utf-8")
+        tmp.replace(UPLOAD_DIR / "layout.json")
+        logger.info("🧍 Avatar room layout saved")
+        self.send({"type": "layout"})
+        return web.json_response({"saved": True})
 
     async def _ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=30)

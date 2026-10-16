@@ -5,9 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Assistant avatar</title>
 <style>
-  :root { --bg: #111317; --text: #e8e8ea; --muted: #8f96a3; }
+  :root { --bg: #111317; --panel: rgba(24, 26, 32, .94); --line: #343945; --text: #e8e8ea;
+          --muted: #8f96a3; --accent: #6aa8ff; --danger: #ff7a7a; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-               font: 14px system-ui, sans-serif; overflow: hidden; cursor: none; }
+               font: 14px system-ui, sans-serif; overflow: hidden; }
+  body.viewing { cursor: none; }
   #stage { position: fixed; inset: 0; }
   #stage canvas { display: block; width: 100vw !important; height: 100vh !important; }
   #status { position: fixed; left: 12px; bottom: 10px; color: var(--muted); font-size: 12px;
@@ -15,12 +17,78 @@
   #status.hidden { opacity: 0; }
   #debug { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,.6); padding: 8px 10px;
            border-radius: 8px; font: 12px ui-monospace, monospace; white-space: pre; display: none; }
+  #editToggle { position: fixed; top: 10px; right: 10px; opacity: 0; transition: opacity .3s; }
+  body:not(.viewing) #editToggle, #editToggle:hover { opacity: 1; }
+  #editor { position: fixed; top: 10px; right: 10px; width: 290px; max-height: calc(100vh - 20px); overflow: auto;
+            background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+            display: none; flex-direction: column; gap: 8px; }
+  body.editing #editor { display: flex; }
+  body.editing #editToggle { display: none; }
+  #editor h1 { font-size: 15px; margin: 0; }
+  #editor h2 { font-size: 11px; margin: 6px 0 0; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+  #editor p { margin: 0; color: var(--muted); font-size: 12px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .row > select, .row > input[type=text], .row > input[type=number] { flex: 1; min-width: 0; }
+  button, select, input, label.btn { background: #2b2f38; color: var(--text); border: 1px solid var(--line);
+           border-radius: 6px; padding: 6px 8px; font: inherit; }
+  button, label.btn { cursor: pointer; }
+  button.on { background: var(--accent); border-color: var(--accent); color: #0b1020; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1020; font-weight: 600; }
+  button.danger { color: var(--danger); }
+  #selName { font-weight: 600; word-break: break-all; }
 </style>
 </head>
-<body>
+<body class="viewing">
 <div id="stage"></div>
 <div id="status">Connecting…</div>
 <div id="debug"></div>
+<button id="editToggle" title="Edit the room (M)">✎ Edit room</button>
+
+<div id="editor">
+  <h1>Room editor</h1>
+  <p>Click an object to select it. G = move, R = rotate, S = scale, Delete = hide/remove. Drag empty space to look around.</p>
+
+  <h2>Selected</h2>
+  <div id="selName">Nothing</div>
+  <div class="row">
+    <button data-mode="translate" class="on">Move</button>
+    <button data-mode="rotate">Rotate</button>
+    <button data-mode="scale">Scale</button>
+    <button id="removeBtn" class="danger">Hide / remove</button>
+  </div>
+  <div id="spotProps" style="display:none; flex-direction:column; gap:6px">
+    <div class="row"><input id="spotName" type="text" placeholder="Spot name"></div>
+    <div class="row">
+      <select id="spotType">
+        <option value="home">home (where she stands to talk)</option>
+        <option value="stand">stand</option>
+        <option value="sit">sit</option>
+        <option value="sleep">sleep</option>
+        <option value="dance">dance</option>
+      </select>
+    </div>
+    <div class="row"><select id="spotAnim"></select></div>
+  </div>
+
+  <h2>Room</h2>
+  <div class="row"><select id="roomFile"></select></div>
+  <div class="row">Size <input id="roomScale" type="number" step="0.05" min="0.01" value="1"></div>
+  <div class="row"><button id="showHidden">Show hidden objects</button></div>
+
+  <h2>Add</h2>
+  <div class="row"><select id="itemFile"></select><button id="addItem">Add furniture</button></div>
+  <div class="row"><select id="newSpotType">
+      <option value="sit" selected>sit</option><option value="home">home</option><option value="stand">stand</option>
+      <option value="sleep">sleep</option><option value="dance">dance</option>
+    </select><button id="addSpot">Add spot</button></div>
+  <div class="row"><label class="btn">Upload files…<input id="upload" type="file" multiple hidden
+      accept=".glb,.vrm,.fbx,.vrma"></label></div>
+
+  <h2>Save</h2>
+  <div class="row"><button id="saveView">Use this camera view</button></div>
+  <div class="row"><button id="save" class="primary">Save room</button><button id="exitEdit">Done</button></div>
+  <p id="saveStatus"></p>
+</div>
 
 <script type="importmap">
 { "imports": {
@@ -30,40 +98,42 @@
 } }
 </script>
 <script type="module">
-// Shows the active persona's VRM model and animates it from the add-on's
-// websocket: phase → animation, reply loudness → mouth, wake → greeting move.
-// URL options: ?lola=File.vrm&jarvis=Other.vrm (model per persona name),
-// ?lola_style=female&jarvis_style=male (prefer animations tagged _female/_male),
+// Shows the active persona's VRM model, in an optional room, and animates it
+// from the add-on's websocket: phase → animation, reply loudness → mouth,
+// wake → greeting move. Edit mode (M or the ✎ button) arranges the room and
+// Nabu's spots and saves them to the add-on.
+// URL options: ?jarvis=X.vrm&nabu=Y.vrm (model per persona name),
+// ?nabu_style=female&jarvis_style=male (prefer animations tagged _female/_male),
 // ?delay=450 (ms the mouth waits so it lines up with the Voice PE's speaker),
-// ?debug=1. Press "d" to toggle the debug overlay.
+// ?debug=1 (or press D).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
 const params = new URLSearchParams(location.search);
 const MOUTH_DELAY = Number(params.get('delay') ?? 450) / 1000;
-const statusEl = document.getElementById('status');
-const debugEl = document.getElementById('debug');
+const $ = id => document.getElementById(id);
+const statusEl = $('status'), debugEl = $('debug');
 let debugOn = params.get('debug') === '1';
-addEventListener('keydown', e => { if (e.key === 'd') debugOn = !debugOn; });
-const setStatus = (text, fade = false) => {
-  statusEl.textContent = text;
-  statusEl.classList.toggle('hidden', fade);
-};
+const setStatus = (text, fade = false) => { statusEl.textContent = text; statusEl.classList.toggle('hidden', fade); };
 
 // ---------- scene ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
-document.getElementById('stage').appendChild(renderer.domElement);
+$('stage').appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x111317);
-const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 20);
-scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-const sun = new THREE.DirectionalLight(0xffffff, 1.4);
-sun.position.set(1, 2, 2);
+const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.05, 200);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445066, 0.9));
+const sun = new THREE.DirectionalLight(0xffffff, 1.3);
+sun.position.set(2, 4, 3);
 scene.add(sun);
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -115,36 +185,55 @@ function retarget(asset, vrm) {
         values.map((x, i) => (vrm0 && i % 2 === 0 ? -x : x))));
     } else if (track instanceof THREE.VectorKeyframeTrack && rigName === 'mixamorigHips') {
       // Keep the character on its spot: hips may bob up and down, but sideways
-      // and forward drift is pinned to the first frame so it never walks out of view.
-      const x0 = track.values[0], z0 = track.values[2];
+      // and forward stay at the model's own rest position, so no animation
+      // shifts or walks it out of view.
+      const rest = node.position.clone();
       tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.${property}`, track.times,
         track.values.map((x, i) => {
           const axis = i % 3;
-          const pinned = axis === 0 ? x0 : axis === 2 ? z0 : x;
-          return (vrm0 && axis !== 1 ? -pinned : pinned) * hipsScale;
+          return axis === 0 ? rest.x : axis === 2 ? rest.z : x * hipsScale;
         })));
     }
   }
   return new THREE.AnimationClip(clip.name, clip.duration, tracks);
 }
 
+// ---------- files ----------
+let files = [];
+async function refreshFiles() {
+  files = await (await fetch('files', { cache: 'no-store' })).json();
+  fillSelect($('roomFile'), ['(no room)', ...glbs()], layout.room?.file || '(no room)');
+  fillSelect($('itemFile'), glbs());
+  $('roomScale').value = layout.room?.scale ?? 1;
+}
+const glbs = () => files.filter(f => /\.glb$/i.test(f));
+function fillSelect(sel, options, value) {
+  sel.innerHTML = '';
+  for (const o of options) { const el = document.createElement('option'); el.value = el.textContent = o; sel.appendChild(el); }
+  if (value !== undefined) sel.value = value;
+}
+
 // ---------- characters ----------
-// One entry per loaded model: { vrm, mixer, actions: Map(name → action), current, headY }
-const characters = new Map();     // file name → character
-let personaModels = {};           // persona name (lower case) → file name
-let active = null;                // the visible character
-let activePersona = null;
-const gltf = new GLTFLoader();
-gltf.register(parser => new VRMLoaderPlugin(parser));
+const characters = new Map();     // file name → { vrm, mixer, actions, current, headY, style }
+const personaModels = {};         // persona name (lower case) → file name
+let active = null, activePersona = null;
+const vrmLoader = new GLTFLoader();
+vrmLoader.register(parser => new VRMLoaderPlugin(parser));
+// Rooms and furniture from Sketchfab/Fab are often Draco- or Meshopt-compressed.
+const glbLoader = new GLTFLoader();
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/libs/draco/gltf/');
+glbLoader.setDRACOLoader(draco);
+glbLoader.setMeshoptDecoder(MeshoptDecoder);
 const fbx = new FBXLoader();
+let animationNames = [];
 const ONE_SHOT = /bow|wave|greet|shrug|nod|thank|reject|forehead|taunt/i;
-// Animation variants per character: "Talking_female" vs "Talking_male".
-const STYLE_DEFAULTS = { lola: 'female', jarvis: 'male' };
+const STYLE_DEFAULTS = { nabu: 'female', lola: 'female', jarvis: 'male' };
 const tagged = (name, tag) => new RegExp(`(^|[_ -])${tag}($|[_ .-])`, 'i').test(name);
 const anyStyle = name => tagged(name, 'female') || tagged(name, 'male');
 
 async function loadCharacter(file, animations) {
-  const g = await gltf.loadAsync(`files/${encodeURIComponent(file)}`);
+  const g = await vrmLoader.loadAsync(`files/${encodeURIComponent(file)}`);
   const vrm = g.userData.vrm;
   VRMUtils.rotateVRM0(vrm);
   vrm.scene.visible = false;
@@ -152,7 +241,7 @@ async function loadCharacter(file, animations) {
   vrm.scene.updateMatrixWorld(true);
   const head = vrm.humanoid.getNormalizedBoneNode('head');
   const ch = { vrm, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
-               headY: head ? head.getWorldPosition(new THREE.Vector3()).y : 1.5 };
+               headY: head ? head.getWorldPosition(new THREE.Vector3()).y : 1.5, style: null };
   for (const [name, asset] of animations) {
     try {
       const action = ch.mixer.clipAction(retarget(asset, vrm));
@@ -166,12 +255,9 @@ async function loadCharacter(file, animations) {
   return ch;
 }
 
-// Best match for a pattern: this character's style first, then untagged, then anything.
 function find(ch, re) {
   const names = [...ch.actions.keys()].filter(n => re.test(n));
-  return (ch.style && names.find(n => tagged(n, ch.style)))
-      || names.find(n => !anyStyle(n))
-      || names[0];
+  return (ch.style && names.find(n => tagged(n, ch.style))) || names.find(n => !anyStyle(n)) || names[0];
 }
 function play(ch, name, fade = 0.5) {
   const next = name && ch.actions.get(name);
@@ -181,7 +267,6 @@ function play(ch, name, fade = 0.5) {
   if (prev) prev.fadeOut(fade);
   ch.current = name;
 }
-// Phase → which kind of animation; resolved per model by file name.
 function phaseAnimation(phase) {
   if (phase === 'replying') return /talk|explain/i;
   if (phase === 'thinking') return /think|ponder|look/i;
@@ -192,40 +277,341 @@ function playFor(ch, pattern) {
   if (busy) return;
   play(ch, find(ch, pattern) || find(ch, /idle/i));
 }
-
-function frame(ch) {
-  const h = ch.headY;
-  camera.position.set(0, h * 0.82, h * 1.55);
-  camera.lookAt(0, h * 0.72, 0);
-}
-
 function modelFor(persona) {
   const key = (persona || '').toLowerCase();
+  if (!personaModels[key]) {
+    const hit = [...characters.keys()].find(f => f.toLowerCase().includes(key));
+    if (hit) personaModels[key] = hit;
+  }
   return personaModels[key] || personaModels.__default;
 }
-
 function showPersona(persona) {
   activePersona = persona;
   const ch = characters.get(modelFor(persona));
   if (!ch) return;
   const key = (persona || '').toLowerCase();
   ch.style = params.get(`${key}_style`) || STYLE_DEFAULTS[key] || null;
-  if (ch === active) return;
-  if (active) active.vrm.scene.visible = false;
-  active = ch;
-  active.vrm.scene.visible = true;
-  frame(active);
+  if (ch !== active) {
+    if (active) active.vrm.scene.visible = false;
+    active = ch;
+    active.vrm.scene.visible = true;
+  }
+  placeCharacter();
+  if (!editing) applyViewCamera();
   playFor(active, phaseAnimation(lastPhase));
 }
 
+// ---------- room, furniture, spots ----------
+let layout = {};
+const roomGroup = new THREE.Group(); roomGroup.name = 'room';
+const itemsGroup = new THREE.Group();
+const spotsGroup = new THREE.Group();
+scene.add(roomGroup, itemsGroup, spotsGroup);
+let roomMixer = null;
+const roomObjects = new Map();    // key → object (top-level parts of the room model)
+const SPOT_COLORS = { home: 0x6aa8ff, stand: 0x9ad18b, sit: 0xf2c46d, sleep: 0xb79cf2, dance: 0xff8fb1 };
+
+const toArr = v => v.toArray().map(x => Math.round(x * 10000) / 10000);
+function applyTransform(obj, t) {
+  if (!t) return;
+  if (t.position) obj.position.fromArray(t.position);
+  if (t.quaternion) obj.quaternion.fromArray(t.quaternion);
+  if (t.scale) obj.scale.fromArray(t.scale);
+}
+const readTransform = obj => ({ position: toArr(obj.position), quaternion: toArr(obj.quaternion), scale: toArr(obj.scale) });
+
+// The parts of a room model you can select: skip single-child wrapper nodes
+// (Sketchfab exports nest the scene a few levels deep), then take the children.
+function roomParts(root) {
+  let node = root;
+  while (node.children.length === 1 && !node.isMesh) node = node.children[0];
+  return node.children;
+}
+
+async function loadRoom() {
+  roomGroup.clear(); roomObjects.clear(); roomMixer = null;
+  const room = layout.room;
+  if (!room?.file) return;
+  const g = await glbLoader.loadAsync(`files/${encodeURIComponent(room.file)}`);
+  roomGroup.add(g.scene);
+  roomGroup.scale.setScalar(room.scale ?? 1);
+  const seen = {};
+  for (const part of roomParts(g.scene)) {
+    let key = part.name || 'part';
+    seen[key] = (seen[key] || 0) + 1;
+    if (seen[key] > 1) key = `${key}#${seen[key]}`;
+    part.userData = { kind: 'roomPart', key };
+    roomObjects.set(key, part);
+    const o = room.objects?.[key];
+    applyTransform(part, o);
+    part.visible = !o?.hidden;
+  }
+  if (g.animations.length) {
+    roomMixer = new THREE.AnimationMixer(g.scene);
+    for (const clip of g.animations) roomMixer.clipAction(clip).play();
+  }
+}
+
+async function addItemObject(item) {
+  const g = await glbLoader.loadAsync(`files/${encodeURIComponent(item.file)}`);
+  const wrap = new THREE.Group();
+  wrap.add(g.scene);
+  wrap.userData = { kind: 'item', id: item.id, file: item.file };
+  applyTransform(wrap, item);
+  itemsGroup.add(wrap);
+  return wrap;
+}
+async function loadItems() {
+  itemsGroup.clear();
+  for (const item of layout.items || []) {
+    try { await addItemObject(item); } catch (e) { console.warn('item', item.file, e); }
+  }
+}
+
+function spotMarker(spot) {
+  const g = new THREE.Group();
+  const color = SPOT_COLORS[spot.type] ?? 0xffffff;
+  const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.02, 32),
+    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, depthTest: false }));
+  const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.25, 16),
+    new THREE.MeshBasicMaterial({ color, depthTest: false }));
+  arrow.rotation.x = Math.PI / 2; arrow.position.set(0, 0.02, 0.3);   // points the way she faces (+Z)
+  ring.renderOrder = arrow.renderOrder = 10;
+  g.add(ring, arrow);
+  g.position.fromArray(spot.position || [0, 0, 0]);
+  g.rotation.y = spot.rotationY || 0;
+  g.userData = { kind: 'spot', id: spot.id };
+  return g;
+}
+function loadSpots() {
+  spotsGroup.clear();
+  for (const spot of layout.spots || []) spotsGroup.add(spotMarker(spot));
+  spotsGroup.visible = editing;
+}
+const homeSpot = () => (layout.spots || []).find(s => s.type === 'home') || (layout.spots || [])[0];
+
+function placeCharacter() {
+  if (!active) return;
+  const spot = homeSpot();
+  active.vrm.scene.position.fromArray(spot?.position || [0, 0, 0]);
+  active.vrm.scene.rotation.y = spot?.rotationY || 0;
+}
+
+function applyViewCamera() {
+  if (layout.camera) {
+    camera.position.fromArray(layout.camera.position);
+    camera.lookAt(new THREE.Vector3().fromArray(layout.camera.target));
+  } else if (active) {
+    const p = active.vrm.scene.position, h = active.headY;
+    camera.position.set(p.x, p.y + h * 0.82, p.z + h * 1.55);
+    camera.lookAt(p.x, p.y + h * 0.72, p.z);
+  }
+}
+
+async function loadLayout() {
+  layout = await (await fetch('layout', { cache: 'no-store' })).json();
+  await loadRoom();
+  await loadItems();
+  loadSpots();
+  placeCharacter();
+  if (!editing) applyViewCamera();
+}
+
+// ---------- editor ----------
+let editing = false, selected = null;
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enabled = false;
+const gizmo = new TransformControls(camera, renderer.domElement);
+gizmo.addEventListener('dragging-changed', e => { orbit.enabled = !e.value; });
+scene.add(gizmo.getHelper());
+gizmo.getHelper().visible = false;
+
+function setEditing(on) {
+  editing = on;
+  document.body.classList.toggle('editing', on);
+  document.body.classList.toggle('viewing', !on);
+  orbit.enabled = on;
+  spotsGroup.visible = on;
+  if (on) {
+    const target = layout.camera?.target || (active ? toArr(active.vrm.scene.position.clone().add(new THREE.Vector3(0, active.headY * 0.6, 0))) : [0, 1, 0]);
+    orbit.target.fromArray(target);
+    orbit.update();
+    refreshFiles();
+  } else {
+    select(null);
+    applyViewCamera();
+  }
+}
+$('editToggle').onclick = () => setEditing(true);
+$('exitEdit').onclick = () => setEditing(false);
+
+function select(obj) {
+  selected = obj;
+  if (obj) { gizmo.attach(obj); gizmo.getHelper().visible = true; } else { gizmo.detach(); gizmo.getHelper().visible = false; }
+  const d = obj?.userData;
+  $('selName').textContent = !d ? 'Nothing' : d.kind === 'roomPart' ? `Room: ${d.key}`
+    : d.kind === 'item' ? `Furniture: ${d.file}` : `Spot: ${spotOf(d.id)?.name || spotOf(d.id)?.type}`;
+  const isSpot = d?.kind === 'spot';
+  $('spotProps').style.display = isSpot ? 'flex' : 'none';
+  if (isSpot) {
+    const s = spotOf(d.id);
+    $('spotName').value = s.name || '';
+    $('spotType').value = s.type;
+    fillSelect($('spotAnim'), ['(automatic)', ...animationNames], s.animation || '(automatic)');
+    setMode('translate');
+  }
+}
+const spotOf = id => (layout.spots || []).find(s => s.id === id);
+
+function setMode(mode) {
+  gizmo.setMode(mode);
+  const spot = selected?.userData.kind === 'spot';
+  gizmo.showX = gizmo.showZ = !(spot && mode === 'rotate');
+  document.querySelectorAll('[data-mode]').forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+}
+document.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => setMode(b.dataset.mode));
+
+// Click to select: the nearest room part, furniture piece or spot under the pointer.
+const raycaster = new THREE.Raycaster();
+let downAt = null;
+renderer.domElement.addEventListener('pointerdown', e => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!editing || gizmo.dragging || !downAt) return;
+  if (Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;   // that was a drag
+  const pointer = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObjects([spotsGroup, itemsGroup, roomGroup], true);
+  for (const hit of hits) {
+    let o = hit.object;
+    while (o && !o.userData?.kind) o = o.parent;
+    if (o && o.visible) { select(o); return; }
+  }
+  select(null);
+});
+
+// Keep the layout in step as things are dragged.
+gizmo.addEventListener('objectChange', () => {
+  const d = selected?.userData;
+  if (!d) return;
+  if (d.kind === 'spot') {
+    const s = spotOf(d.id);
+    s.position = toArr(selected.position);
+    s.rotationY = Math.round(selected.rotation.y * 10000) / 10000;
+    if (s.type === 'home') placeCharacter();
+  } else if (d.kind === 'item') {
+    Object.assign(layout.items.find(i => i.id === d.id), readTransform(selected));
+  } else if (d.kind === 'roomPart') {
+    layout.room.objects ??= {};
+    layout.room.objects[d.key] = { ...layout.room.objects[d.key], ...readTransform(selected) };
+  }
+});
+
+$('removeBtn').onclick = removeSelected;
+function removeSelected() {
+  const d = selected?.userData;
+  if (!d) return;
+  if (d.kind === 'roomPart') {
+    layout.room.objects ??= {};
+    layout.room.objects[d.key] = { ...layout.room.objects[d.key], hidden: true };
+    selected.visible = false;
+  } else if (d.kind === 'item') {
+    layout.items = layout.items.filter(i => i.id !== d.id);
+    itemsGroup.remove(selected);
+  } else if (d.kind === 'spot') {
+    layout.spots = layout.spots.filter(s => s.id !== d.id);
+    spotsGroup.remove(selected);
+  }
+  select(null);
+}
+$('showHidden').onclick = () => {
+  for (const [key, part] of roomObjects) {
+    if (layout.room?.objects?.[key]?.hidden) { layout.room.objects[key].hidden = false; part.visible = true; }
+  }
+};
+
+$('roomFile').onchange = async e => {
+  const file = e.target.value === '(no room)' ? null : e.target.value;
+  layout.room = file ? { file, scale: 1, objects: {} } : null;
+  $('roomScale').value = 1;
+  await loadRoom();
+};
+$('roomScale').oninput = e => {
+  const v = Number(e.target.value);
+  if (!layout.room || !(v > 0)) return;
+  layout.room.scale = v;
+  roomGroup.scale.setScalar(v);
+};
+
+const newId = () => Math.random().toString(36).slice(2, 10);
+const inFrontOfCamera = () => {
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  const p = camera.position.clone().add(dir.multiplyScalar(2)); p.y = 0;
+  return toArr(p);
+};
+$('addItem').onclick = async () => {
+  const file = $('itemFile').value;
+  if (!file) return;
+  const item = { id: newId(), file, position: inFrontOfCamera(), quaternion: [0, 0, 0, 1], scale: [1, 1, 1] };
+  layout.items = [...(layout.items || []), item];
+  select(await addItemObject(item));
+};
+$('addSpot').onclick = () => {
+  const spot = { id: newId(), type: $('newSpotType').value, name: '', position: inFrontOfCamera(), rotationY: 0 };
+  layout.spots = [...(layout.spots || []), spot];
+  const marker = spotMarker(spot);
+  spotsGroup.add(marker);
+  select(marker);
+  if (spot.type === 'home') placeCharacter();
+};
+$('spotName').oninput = e => { const s = spotOf(selected.userData.id); s.name = e.target.value; };
+$('spotType').onchange = e => {
+  const s = spotOf(selected.userData.id); s.type = e.target.value;
+  const color = SPOT_COLORS[s.type];
+  selected.traverse(o => o.material?.color?.setHex(color));
+  placeCharacter();
+};
+$('spotAnim').onchange = e => {
+  const s = spotOf(selected.userData.id);
+  s.animation = e.target.value === '(automatic)' ? undefined : e.target.value;
+};
+
+$('saveView').onclick = () => {
+  layout.camera = { position: toArr(camera.position), target: toArr(orbit.target) };
+  $('saveStatus').textContent = 'Camera view set — remember to save.';
+};
+$('save').onclick = async () => {
+  const r = await fetch('layout', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(layout) });
+  $('saveStatus').textContent = r.ok ? `Saved ${new Date().toLocaleTimeString()}` : `Save failed (${r.status})`;
+};
+$('upload').onchange = async e => {
+  for (const f of e.target.files) {
+    $('saveStatus').textContent = `Uploading ${f.name}…`;
+    const r = await fetch(`files/${encodeURIComponent(f.name)}`, { method: 'PUT', body: f });
+    if (!r.ok) { $('saveStatus').textContent = `Upload of ${f.name} failed (${r.status})`; return; }
+  }
+  $('saveStatus').textContent = 'Uploaded. New models appear after a reload.';
+  e.target.value = '';
+  refreshFiles();
+};
+
+addEventListener('keydown', e => {
+  if (e.target.matches('input, select')) return;
+  const k = e.key.toLowerCase();
+  if (k === 'd') debugOn = !debugOn;
+  else if (k === 'm') setEditing(!editing);
+  else if (editing && k === 'g') setMode('translate');
+  else if (editing && k === 'r') setMode('rotate');
+  else if (editing && k === 's') setMode('scale');
+  else if (editing && (k === 'delete' || k === 'backspace')) removeSelected();
+  else if (editing && k === 'escape') select(null);
+});
+
+// ---------- boot ----------
 async function boot() {
-  setStatus('Loading models…');
-  const files = await (await fetch('files')).json();
+  setStatus('Loading…');
+  files = await (await fetch('files', { cache: 'no-store' })).json();
   const vrms = files.filter(f => /\.vrm$/i.test(f));
   const fbxs = files.filter(f => /\.fbx$/i.test(f));
-  if (!vrms.length) { setStatus('No .vrm files found. Upload them in Home Assistant: Media → My media → avatar'); return; }
-
-  // Persona → model: ?<persona>=File.vrm, else a file whose name contains the persona name.
   for (const [k, v] of params) if (/\.vrm$/i.test(v)) personaModels[k.toLowerCase()] = v;
   personaModels.__default = vrms[0];
 
@@ -236,39 +622,31 @@ async function boot() {
       if (THREE.AnimationClip.findByName(asset.animations, 'mixamo.com')) animations.push([f.replace(/\.fbx$/i, ''), asset]);
     } catch (e) { console.warn('fbx', f, e); }
   }
+  animationNames = animations.map(([n]) => n);
   for (const f of vrms) {
-    try { characters.set(f, await loadCharacter(f, animations)); }
-    catch (e) { console.warn('vrm', f, e); }
+    try { characters.set(f, await loadCharacter(f, animations)); } catch (e) { console.warn('vrm', f, e); }
   }
-  setStatus(`${characters.size} model(s), ${animations.length} animation(s). Waiting for the assistant…`);
+  try { await loadLayout(); } catch (e) { console.warn('layout', e); }
+  if (!vrms.length) setStatus('No .vrm models uploaded yet.');
+  else setStatus(`${characters.size} model(s), ${animations.length} animation(s). Waiting for the assistant…`);
+  if (params.get('edit') === '1') setEditing(true);
   connect();
-}
-
-// Name-based fallback once we know a persona name.
-function guessModel(persona) {
-  const key = (persona || '').toLowerCase();
-  if (personaModels[key]) return;
-  const hit = [...characters.keys()].find(f => f.toLowerCase().includes(key));
-  if (hit) personaModels[key] = hit;
 }
 
 // ---------- live data ----------
 let lastPhase = 'idle';
-const envelope = [];      // { t (seconds, performance clock), v }
-let envCursor = 0;        // time where the next envelope value starts
-let mouth = 0;
+const envelope = [];
+let envCursor = 0, mouth = 0;
 
 function onMessage(msg) {
   const now = performance.now() / 1000;
   switch (msg.type) {
     case 'state':
       lastPhase = msg.phase || 'idle';
-      if (msg.persona) { guessModel(msg.persona); showPersona(msg.persona); }
+      if (msg.persona) showPersona(msg.persona);
       setStatus(`${msg.persona || ''} connected`, true);
       break;
-    case 'persona':
-      guessModel(msg.value); showPersona(msg.value);
-      break;
+    case 'persona': showPersona(msg.value); break;
     case 'phase':
       lastPhase = msg.value;
       if (active) playFor(active, phaseAnimation(msg.value));
@@ -276,19 +654,14 @@ function onMessage(msg) {
     case 'wake':
       if (active) { const greet = find(active, /bow|wave|greet/i); if (greet) play(active, greet, 0.3); }
       break;
-    case 'interrupt':
-      envelope.length = 0;
-      break;
-    case 'env': {
-      // Audio arrives faster than real time; lay the values out on a timeline
-      // that starts MOUTH_DELAY after the first chunk of a reply.
+    case 'interrupt': envelope.length = 0; break;
+    case 'layout': if (!editing) loadLayout(); break;
+    case 'env':
       if (envCursor < now) envCursor = now + MOUTH_DELAY;
       for (const v of msg.values) { envelope.push({ t: envCursor, v }); envCursor += msg.dt; }
       break;
-    }
   }
 }
-
 function connect() {
   const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   ws.onmessage = e => { try { onMessage(JSON.parse(e.data)); } catch {} };
@@ -305,6 +678,8 @@ renderer.setAnimationLoop(() => {
   const target = envelope.length && envelope[0].t <= now ? Math.min(1, envelope[0].v * 6) : 0;
   mouth += (target - mouth) * (target > mouth ? 0.55 : 0.25);
 
+  roomMixer?.update(dt);
+  if (editing) orbit.update();
   for (const ch of characters.values()) {
     if (!ch.vrm.scene.visible) continue;
     ch.mixer.update(dt);
@@ -321,10 +696,13 @@ renderer.setAnimationLoop(() => {
   }
   if (debugOn) {
     debugEl.style.display = 'block';
-    debugEl.textContent = `persona  ${activePersona}\nmodel    ${active ? [...characters].find(([, c]) => c === active)?.[0] : '-'}\nphase    ${lastPhase}\nanim     ${active?.current}\nmouth    ${mouth.toFixed(2)}\nqueued   ${envelope.length}`;
+    debugEl.textContent = `persona  ${activePersona}\nphase    ${lastPhase}\nanim     ${active?.current}\nmouth    ${mouth.toFixed(2)}\nroom     ${layout.room?.file || '-'}\nspots    ${(layout.spots || []).length}`;
   } else debugEl.style.display = 'none';
   renderer.render(scene, camera);
 });
+
+// Handle for poking at the scene from the browser console.
+window.avatar = { scene, camera, roomGroup, get layout() { return layout; }, get active() { return active; } };
 
 boot().catch(e => setStatus(`Failed to start: ${e.message}`));
 </script>
