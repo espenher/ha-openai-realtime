@@ -136,7 +136,9 @@ $('stage').appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x111317);
 const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.05, 200);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x445066, 0.9));
+// A warm, light ground colour: a dark blue-grey one tinted every downward-facing
+// fold (under the chin, neck creases) into dark streaks on toon-shaded skin.
+scene.add(new THREE.HemisphereLight(0xffffff, 0xcdbfb6, 0.9));
 const sun = new THREE.DirectionalLight(0xffffff, 1.3);
 sun.position.set(2, 4, 3);
 scene.add(sun);
