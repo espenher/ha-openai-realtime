@@ -2,6 +2,9 @@
 import os
 import sys
 import json
+import time
+import threading
+import faulthandler
 import asyncio
 import logging
 import aiohttp
@@ -800,6 +803,7 @@ class Application:
         )
         
         announce_task = asyncio.create_task(self._announce_listener())
+        _start_loop_watchdog()
 
         # Avatar page (3D character that animates with the assistant). 0 = off.
         try:
@@ -959,6 +963,40 @@ class Application:
             self.audio_recording_service.cleanup()
         
         logger.info("✅ Application cleanup complete")
+
+
+LOOP_STALL_RESTART_S = 45
+
+
+def _start_loop_watchdog() -> None:
+    """Restart the add-on's process if the event loop stops turning.
+
+    Seen once (2026-10-16): the loop spun on one core for over an hour and
+    both the device websocket and the avatar page stopped answering until a
+    manual restart. A heartbeat task stamps the time every second; a plain
+    thread checks it, and on a stall dumps every thread's stack to the log
+    (so the cause can be found) and re-executes the process in place.
+    """
+    last_beat = [time.monotonic()]
+
+    async def beat() -> None:
+        while True:
+            last_beat[0] = time.monotonic()
+            await asyncio.sleep(1)
+
+    def watch() -> None:
+        while True:
+            time.sleep(5)
+            stalled = time.monotonic() - last_beat[0]
+            if stalled > LOOP_STALL_RESTART_S:
+                logger.error(f"🐶 event loop stalled for {stalled:.0f}s — dumping stacks and restarting")
+                faulthandler.dump_traceback(all_threads=True)
+                sys.stdout.flush()
+                sys.stderr.flush()
+                os.execv(sys.executable, [sys.executable, "-m", "app.main"])
+
+    asyncio.create_task(beat())
+    threading.Thread(target=watch, name="loop-watchdog", daemon=True).start()
 
 
 async def main() -> None:
