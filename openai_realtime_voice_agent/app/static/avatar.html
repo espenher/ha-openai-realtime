@@ -316,7 +316,9 @@ function showPersona(persona) {
 // Underwear is never offered: it always stays on. While a garment is worn,
 // the body's matching "shrink" shape keys pull the skin in under it so it
 // doesn't poke through; they go back to 0 when the garment comes off.
-const SHRINK_UNDER = { Jacket: ['UpperArm', 'Elbow', 'LowerArm'], Shirt: ['Chest', 'Spine'], Sneaker: ['Foot', 'Toe'] };
+// Only under garments that cover the whole area: where a shrunk region meets
+// visible skin (e.g. the shirt's open collar) the stretched edge pokes out as spikes.
+const SHRINK_UNDER = { Jacket: ['UpperArm', 'Elbow', 'LowerArm'], Sneaker: ['Foot', 'Toe'] };
 function findGarments(ch) {
   ch.garments = new Map();
   ch.shrinkMeshes = [];
