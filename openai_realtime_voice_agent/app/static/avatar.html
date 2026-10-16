@@ -421,7 +421,7 @@ async function setTexture(ch, slot, file) {
     if (!texture) {
       const image = await loadVariantImage(file);
       texture = original.clone();          // keeps the model's flip, colour space and wrapping
-      texture.image = image;
+      texture.source = new THREE.Source(image);  // a clone shares its image with the original otherwise
       texture.needsUpdate = true;
       ch.variantTextures.set(file, texture);
     }
