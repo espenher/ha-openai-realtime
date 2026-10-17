@@ -41,6 +41,8 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
+from app.persona import CONFIG as PERSONA
+
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = pathlib.Path(__file__).parent / "static"
@@ -54,8 +56,8 @@ ENVELOPE_STEP_S = 0.02
 # What the second persona's avatar can do: moods (a facial expression that stays)
 # and gestures (an animation played once). The room editor saves an edited copy
 # in layout.json ("actions"); until then these defaults apply. The same list
-# drives the page and the instructions below, so the model only ever hears
-# about things the avatar can actually show.
+# drives the page and her instructions (avatar_body.py), so the model only
+# ever hears about things the avatar can actually show.
 #   mood:    "face" = [[expression, weight], ...] from the model's own expressions
 #   gesture: "animation" = an animation file's name without its extension
 DEFAULT_ACTIONS = [
@@ -92,39 +94,25 @@ TAG = re.compile(r"\[([A-Za-z][A-Za-z _-]{0,23})\]\s*")
 UNFINISHED_TAG = re.compile(r"\[[A-Za-z _-]{0,24}$")
 
 
-def _saved_layout() -> dict:
+def load_layout() -> dict:
+    """The room editor's saved layout (room, wardrobe, colours, moods/gestures, character text)."""
     try:
         return json.loads((UPLOAD_DIR / "layout.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
+def save_layout(layout: dict) -> None:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = UPLOAD_DIR / "layout.json.part"
+    tmp.write_text(json.dumps(layout, indent=1), encoding="utf-8")
+    tmp.replace(UPLOAD_DIR / "layout.json")
+
+
 def avatar_actions() -> list[dict]:
     """The avatar's moods and gestures: the room editor's saved list, or the defaults."""
-    actions = _saved_layout().get("actions")
+    actions = load_layout().get("actions")
     return actions if isinstance(actions, list) else DEFAULT_ACTIONS
-
-
-def avatar_instructions() -> str:
-    """The part of the second persona's instructions that explains the avatar tags."""
-    actions = avatar_actions()
-    animations = {p.stem for d in MEDIA_DIRS if d.is_dir() for p in d.iterdir()
-                  if p.suffix.lower() in (".fbx", ".vrma")}
-    moods = [a for a in actions if a.get("kind") == "mood" and a.get("tag")]
-    gestures = [a for a in actions if a.get("kind") == "gesture" and a.get("tag") and a.get("animation") in animations]
-    if not moods and not gestures:
-        return ""
-    line = lambda a: f"[{a['tag']}] {a.get('note', '')}".rstrip()
-    parts = ["\n\n# Your avatar\n"
-             "You have an animated avatar. Control it with tags in square brackets inside your replies. Tags are "
-             "never spoken, so never mention them, and only use the ones listed here."]
-    if moods:
-        parts.append("\n\nMoods (your facial expression; it stays until you change it). Start every reply with "
-                     "one, and put a new one mid-reply when your mood shifts:\n" + "\n".join(map(line, moods)))
-    if gestures:
-        parts.append("\n\nGestures (a short animation, played once where you put the tag). Use one only when it "
-                     "really fits, at most one or two per reply:\n" + "\n".join(map(line, gestures)))
-    return "".join(parts)
 
 
 class AvatarHub:
@@ -241,7 +229,9 @@ class AvatarHub:
                             headers={"Cache-Control": "no-cache"})
 
     async def _get_actions(self, request: web.Request) -> web.Response:
-        return web.json_response({"actions": avatar_actions(), "defaults": DEFAULT_ACTIONS})
+        # "persona": whose replies carry the tags (the page only applies them to that character).
+        return web.json_response({"actions": avatar_actions(), "defaults": DEFAULT_ACTIONS,
+                                  "persona": PERSONA.second_name})
 
     async def _put_layout(self, request: web.Request) -> web.Response:
         try:
@@ -250,10 +240,7 @@ class AvatarHub:
             raise web.HTTPBadRequest(text="Layout must be JSON.")
         if not isinstance(layout, dict):
             raise web.HTTPBadRequest(text="Layout must be a JSON object.")
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = UPLOAD_DIR / "layout.json.part"
-        tmp.write_text(json.dumps(layout, indent=1), encoding="utf-8")
-        tmp.replace(UPLOAD_DIR / "layout.json")
+        save_layout(layout)
         logger.info("🧍 Avatar room layout saved")
         self.send({"type": "layout"})
         if self.on_layout_saved:

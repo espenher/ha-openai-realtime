@@ -22,7 +22,8 @@ from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
 from app.phase_emitter import PhaseEmitter, STALE_AUDIO
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
-from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap, avatar_instructions
+from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap
+from app.avatar_body import avatar_instructions
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)

@@ -19,6 +19,7 @@ from app.mcp_service import HomeAssistantMCPService
 from app.phase_emitter import TURN_LIVENESS, STALE_AUDIO
 from app.persona import CONFIG as PERSONA, SECOND as PERSONA_SECOND
 from app.avatar import HUB as AVATAR
+from app.avatar_body import avatar_tool_definitions, create_avatar_tool_handlers
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
 from app.web_search_tool import get_web_search_tool_definition, create_web_search_tool_handler
 from app.audio_recording_service import AudioRecordingService
@@ -557,6 +558,15 @@ class Application:
             if self.enable_web_search:
                 all_tools.append(get_web_search_tool_definition())
 
+            # The second persona's own clothes and colours on the avatar page.
+            avatar_tools = []
+            if PERSONA.second_available:
+                try:
+                    avatar_tools = avatar_tool_definitions()
+                except Exception as e:
+                    logger.warning(f"🧍 avatar tools unavailable: {e!r}")
+                all_tools.extend(avatar_tools)
+
             # Get MCP tool definitions if available
             mcp_tools_schema = None
             if self.mcp_client:
@@ -700,6 +710,11 @@ class Application:
                     create_web_search_tool_handler(self.openai_api_key, self.web_search_model),
                 )
                 logger.info(f"✅ Registered web_search tool handler (model={self.web_search_model})")
+
+            for name, handler in create_avatar_tool_handlers().items():
+                if any(tool["name"] == name for tool in avatar_tools):
+                    self.openai_service.register_function(name, handler)
+                    logger.info(f"✅ Registered {name} tool handler")
             
             # Register MCP tool handlers if available
             if self.mcp_client and mcp_tools_schema:

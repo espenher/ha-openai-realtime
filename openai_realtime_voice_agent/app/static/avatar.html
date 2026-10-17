@@ -43,7 +43,8 @@
   .act button.x { padding: 4px 7px; }
   #wardrobe label { display: flex; gap: 5px; align-items: center; background: #2b2f38; border: 1px solid var(--line);
                     border-radius: 6px; padding: 4px 8px; cursor: pointer; }
-  button, select, input, label.btn { background: #2b2f38; color: var(--text); border: 1px solid var(--line);
+  textarea { width: 100%; min-height: 70px; resize: vertical; box-sizing: border-box; }
+  button, select, input, textarea, label.btn { background: #2b2f38; color: var(--text); border: 1px solid var(--line);
            border-radius: 6px; padding: 6px 8px; font: inherit; }
   button, label.btn { cursor: pointer; }
   button.on { background: var(--accent); border-color: var(--accent); color: #0b1020; }
@@ -86,6 +87,10 @@
 
   <h2>Animation</h2>
   <div class="row"><select id="testAnim"></select><button id="playAnim">▶ Play</button></div>
+  <h2>Character</h2>
+  <p>Nabu's idea of herself. Her clothes and colours right now are added automatically.</p>
+  <textarea id="charLooks" placeholder="How she looks: hair, eyes, outfit…"></textarea>
+  <textarea id="charRoom" placeholder="Her room: what's in it, what it feels like…"></textarea>
   <h2>Moods &amp; gestures</h2>
   <p>Tags Nabu can put in her replies. Moods set her face, gestures play an animation once. The note tells her when
      to use it. Saved with the room; she knows about changes right away.</p>
@@ -470,6 +475,8 @@ function buildActionsUI() {
     list.appendChild(box);
   }
 }
+$('charLooks').onchange = () => { (layout.character ??= {}).appearance = $('charLooks').value.trim(); };
+$('charRoom').onchange = () => { (layout.character ??= {}).room = $('charRoom').value.trim(); };
 $('addMood').onclick = () => {
   editableActions().push({ tag: 'new mood', kind: 'mood', face: [], note: '' });
   actionsChanged(); buildActionsUI();
@@ -746,6 +753,8 @@ function setEditing(on) {
     buildAppearanceUI();
     buildAnimationUI();
     buildActionsUI();
+    $('charLooks').value = layout.character?.appearance || '';
+    $('charRoom').value = layout.character?.room || '';
   } else {
     select(null);
     applyViewCamera();
@@ -958,7 +967,7 @@ async function boot() {
 // instructions from the same list, so she only uses tags that exist.
 //   mood:    face = [[expression, weight], ...]: held while she talks, fades after
 //   gesture: animation = an animation's name: played once, then back to talking
-let defaultActions = [], catalogue = [], workActions = null;
+let defaultActions = [], catalogue = [], workActions = null, tagPersona = null;
 const normTag = t => String(t || '').toLowerCase().replace(/[ _-]+/g, ' ').trim();
 const findAction = tag => catalogue.find(a => normTag(a.tag) === normTag(tag));
 // Moods she may use even though they aren't in her list.
@@ -970,8 +979,11 @@ const MOOD_ALIASES = {
 };
 const MOOD_HOLD = 4;   // seconds a mood stays on her face after she stops talking
 async function loadCatalogue() {
-  try { defaultActions = (await (await fetch('actions', { cache: 'no-store' })).json()).defaults || []; }
-  catch (e) { console.warn('actions', e); }
+  try {
+    const info = await (await fetch('actions', { cache: 'no-store' })).json();
+    defaultActions = info.defaults || [];
+    tagPersona = info.persona || null;
+  } catch (e) { console.warn('actions', e); }
   catalogue = Array.isArray(layout.actions) ? layout.actions : defaultActions;
   workActions = null;
 }
@@ -1047,9 +1059,14 @@ function onMessage(msg) {
       if (active && msg.value !== 'replying' && active.moodUntil === Infinity) active.moodUntil = now + MOOD_HOLD;
       break;
     case 'tag': if (active) onTag(active, msg.value); break;
-    case 'wake':
-      if (active) { const greet = find(active, /bow|wave|greet/i); if (greet) play(active, greet, 0.3); }
+    case 'wake': {
+      if (!active) break;
+      const wave = normTag(activePersona) === normTag(tagPersona) && findAction('wave');
+      if (wave?.kind === 'gesture' && active.actions.has(wave.animation)) { playGesture(active, wave.animation); break; }
+      const greet = find(active, /bow|wave|greet/i);
+      if (greet) play(active, greet, 0.3);
       break;
+    }
     case 'interrupt': envelope.length = 0; break;
     case 'layout': if (!editing) loadLayout(); break;
     case 'env':
