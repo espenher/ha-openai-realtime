@@ -78,6 +78,8 @@
     <div class="row"><select id="spotAnim"></select></div>
   </div>
 
+  <h2>Animation</h2>
+  <div class="row"><select id="testAnim"></select><button id="playAnim">▶ Play</button></div>
   <h2>Wardrobe</h2>
   <div class="row" id="wardrobe"><p>No separate clothing parts on this model.</p></div>
   <h2>Appearance</h2>
@@ -95,7 +97,7 @@
       <option value="sleep">sleep</option><option value="dance">dance</option>
     </select><button id="addSpot">Add spot</button></div>
   <div class="row"><label class="btn">Upload files…<input id="upload" type="file" multiple hidden
-      accept=".glb,.vrm,.fbx,.vrma"></label></div>
+      accept=".glb,.vrm,.fbx,.vrma,.png,.jpg,.jpeg"></label></div>
 
   <h2>Save</h2>
   <div class="row"><button id="saveView">Use this camera view</button></div>
@@ -107,7 +109,8 @@
 { "imports": {
   "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
   "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
-  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.3.3/lib/three-vrm.module.min.js"
+  "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.3.3/lib/three-vrm.module.min.js",
+  "@pixiv/three-vrm-animation": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm-animation@3.3.3/lib/three-vrm-animation.module.min.js"
 } }
 </script>
 <script type="module">
@@ -127,6 +130,7 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
+import { VRMAnimationLoaderPlugin, VRMLookAtQuaternionProxy, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 
 const params = new URLSearchParams(location.search);
 const MOUTH_DELAY = Number(params.get('delay') ?? 450) / 1000;
@@ -213,6 +217,19 @@ function retarget(asset, vrm) {
   return new THREE.AnimationClip(clip.name, clip.duration, tracks);
 }
 
+// VRM Animation (.vrma) is made for VRM skeletons, so three-vrm-animation maps
+// it directly (including VRM 0.x models). Like the Mixamo clips, the hips keep
+// the model's own sideways/forward position so the character stays on its spot.
+function vrmaClip(animation, vrm) {
+  const clip = createVRMAnimationClip(animation, vrm);
+  const hips = vrm.humanoid.getNormalizedBoneNode('hips');
+  const rest = hips.position.clone();
+  clip.tracks = clip.tracks.map(track => track.name !== `${hips.name}.position` ? track
+    : new THREE.VectorKeyframeTrack(track.name, track.times,
+        track.values.map((x, i) => (i % 3 === 0 ? rest.x : i % 3 === 2 ? rest.z : x))));
+  return clip;
+}
+
 // ---------- files ----------
 let files = [];
 async function refreshFiles() {
@@ -241,8 +258,10 @@ draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/li
 glbLoader.setDRACOLoader(draco);
 glbLoader.setMeshoptDecoder(MeshoptDecoder);
 const fbx = new FBXLoader();
+const vrmaLoader = new GLTFLoader();
+vrmaLoader.register(parser => new VRMAnimationLoaderPlugin(parser));
 let animationNames = [];
-const ONE_SHOT = /bow|wave|greet|shrug|nod|thank|reject|forehead|taunt/i;
+const ONE_SHOT = /bow|wave|greet|shrug|nod|thank|reject|forehead|taunt|peace|shoot|spin|pose|squat|full body/i;
 const STYLE_DEFAULTS = { nabu: 'female', lola: 'female', jarvis: 'male' };
 const tagged = (name, tag) => new RegExp(`(^|[_ -])${tag}($|[_ .-])`, 'i').test(name);
 const anyStyle = name => tagged(name, 'female') || tagged(name, 'male');
@@ -261,9 +280,14 @@ async function loadCharacter(file, animations) {
   const head = vrm.humanoid.getNormalizedBoneNode('head');
   const ch = { file, vrm, root, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
                headY: head ? head.getWorldPosition(new THREE.Vector3()).y : 1.5, style: null };
-  for (const [name, asset] of animations) {
+  if (vrm.lookAt) {
+    const proxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
+    proxy.name = 'lookAtQuaternionProxy';
+    vrm.scene.add(proxy);
+  }
+  for (const [name, makeClip] of animations) {
     try {
-      const action = ch.mixer.clipAction(retarget(asset, vrm));
+      const action = ch.mixer.clipAction(makeClip(vrm));
       if (ONE_SHOT.test(name)) { action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; }
       ch.actions.set(name, action);
     } catch (e) { console.warn('animation', name, e); }
@@ -317,7 +341,7 @@ function showPersona(persona) {
     active.root.visible = true;
   }
   placeCharacter();
-  if (!editing) applyViewCamera(); else { buildWardrobeUI(); buildAppearanceUI(); }
+  if (!editing) applyViewCamera(); else { buildWardrobeUI(); buildAppearanceUI(); buildAnimationUI(); }
   playFor(active, phaseAnimation(lastPhase));
 }
 
@@ -358,6 +382,16 @@ function applyWardrobe(ch) {
     }
   }
 }
+function buildAnimationUI() {
+  fillSelect($('testAnim'), active ? [...active.actions.keys()] : [], active?.current ?? undefined);
+}
+$('playAnim').onclick = () => {
+  const name = $('testAnim').value;
+  if (!active || !name) return;
+  if (active.current === name) active.current = null;   // play it again from the start
+  play(active, name, 0.3);
+};
+
 function buildWardrobeUI() {
   const box = $('wardrobe');
   box.innerHTML = '';
@@ -606,6 +640,7 @@ function setEditing(on) {
     refreshFiles();
     buildWardrobeUI();
     buildAppearanceUI();
+    buildAnimationUI();
   } else {
     select(null);
     applyViewCamera();
@@ -781,6 +816,7 @@ async function boot() {
   files = await (await fetch('files', { cache: 'no-store' })).json();
   const vrms = files.filter(f => /\.vrm$/i.test(f));
   const fbxs = files.filter(f => /\.fbx$/i.test(f));
+  const vrmas = files.filter(f => /\.vrma$/i.test(f));
   for (const [k, v] of params) if (/\.vrm$/i.test(v)) personaModels[k.toLowerCase()] = v;
   personaModels.__default = vrms[0];
 
@@ -788,9 +824,16 @@ async function boot() {
   for (const f of fbxs) {
     try {
       const asset = await fbx.loadAsync(`files/${encodeURIComponent(f)}`);
-      if (THREE.AnimationClip.findByName(asset.animations, 'mixamo.com')) animations.push([f.replace(/\.fbx$/i, ''), asset]);
+      if (THREE.AnimationClip.findByName(asset.animations, 'mixamo.com')) animations.push([f.replace(/\.fbx$/i, ''), vrm => retarget(asset, vrm)]);
     } catch (e) { console.warn('fbx', f, e); }
   }
+  for (const f of vrmas) {
+    try {
+      const animation = (await vrmaLoader.loadAsync(`files/${encodeURIComponent(f)}`)).userData.vrmAnimations?.[0];
+      if (animation) animations.push([f.replace(/\.vrma$/i, ''), vrm => vrmaClip(animation, vrm)]);
+    } catch (e) { console.warn('vrma', f, e); }
+  }
+  animations.sort(([a], [b]) => a.localeCompare(b));
   animationNames = animations.map(([n]) => n);
   for (const f of vrms) {
     try { characters.set(f, await loadCharacter(f, animations)); } catch (e) { console.warn('vrm', f, e); }
