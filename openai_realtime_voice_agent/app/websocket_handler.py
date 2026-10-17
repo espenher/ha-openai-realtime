@@ -22,7 +22,7 @@ from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
 from app.phase_emitter import PhaseEmitter, STALE_AUDIO
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
-from app.avatar import HUB as AVATAR, AvatarTap
+from app.avatar import HUB as AVATAR, MOOD_INSTRUCTIONS, AvatarTap, MoodTags
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)
@@ -496,7 +496,9 @@ class WebSocketHandler:
         # must sit BEFORE the assistant context aggregator, which consumes the
         # text frames.
         tts_components = []
+        mood_components = []
         if PERSONA.second_available:
+            mood_components = [MoodTags()]
             from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
             tts_components = [
                 TtsGate(),
@@ -525,6 +527,7 @@ class WebSocketHandler:
                 context_aggregator.user(),
                 TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
                 openai_service,
+                *mood_components,
                 assistant_tap,
                 *tts_components,
                 context_aggregator.assistant(),
@@ -533,6 +536,7 @@ class WebSocketHandler:
             pipeline_components.extend([
                 TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
                 openai_service,
+                *mood_components,
                 assistant_tap,
                 *tts_components,
             ])
@@ -818,7 +822,7 @@ class WebSocketHandler:
 
         def _persona_settings(target: str) -> tuple[str, list[str]]:
             if target == SECOND:
-                return PERSONA.second_instructions, ["text"]
+                return PERSONA.second_instructions + MOOD_INSTRUCTIONS, ["text"]
             return main_instructions, ["audio"]
 
         async def _quick_switch_persona(target: str) -> bool:

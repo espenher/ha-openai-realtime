@@ -286,6 +286,7 @@ async function loadCharacter(file, animations) {
   const ch = { file, vrm, root, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
                headY: head ? head.getWorldPosition(new THREE.Vector3()).y : 1.5, style: null };
   if (vrm.lookAt) {
+    vrm.lookAt.target = gaze;
     const proxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
     proxy.name = 'lookAtQuaternionProxy';
     vrm.scene.add(proxy);
@@ -850,6 +851,76 @@ async function boot() {
   connect();
 }
 
+// ---------- facial expressions and gaze ----------
+// Nabu's replies carry a mood tag ("[smug] ..."); the add-on takes it out
+// before her voice reads the text and sends it here. Each mood is a mix of the
+// model's own expressions: the first mix whose expressions all exist on the
+// model is used, so a model with only the standard VRM set still gets close.
+const MOODS = {
+  happy:     [[['happy', 0.55], ['relaxed', 0.4]]],
+  smug:      [[['Confident', 0.9]], [['relaxed', 0.7]]],
+  teasing:   [[['Confident', 0.6], ['relaxed', 0.4]], [['relaxed', 0.8]]],
+  annoyed:   [[['Sulk', 1]], [['angry', 0.4]]],
+  angry:     [[['angry', 1]]],
+  bored:     [[['Meh', 0.9]], [['relaxed', 0.3]]],
+  surprised: [[['eyeWideLeft', 1], ['eyeWideRight', 1], ['browInnerUp', 1], ['mouthFunnel', 0.4], ['jawOpen', 0.1]],
+              [['surprised', 0.8]]],
+  shocked:   [[['Shock', 0.8]], [['surprised', 1]]],
+  sad:       [[['Sorrow', 0.9]], [['sad', 0.8]]],
+  shy:       [[['Shy', 1], ['relaxed', 0.3]], [['relaxed', 0.6]]],
+  excited:   [[['Sparkly_Eyes', 1], ['relaxed', 0.5]], [['happy', 0.8]]],
+  tired:     [[['Exhausted', 0.6]], [['relaxed', 0.5]]],
+  serious:   [[['Serious', 0.5]], [['angry', 0.2]]],
+  confused:  [[['Guruguru_Eyes', 0.7]], [['surprised', 0.3]]],
+  scared:    [[['Fear', 1]], [['surprised', 0.6], ['sad', 0.3]]],
+};
+// Moods the model may use even though they aren't in its list.
+const MOOD_ALIASES = {
+  sarcastic: 'smug', proud: 'smug', playful: 'teasing', amused: 'teasing', cheerful: 'happy', glad: 'happy',
+  delighted: 'excited', irritated: 'annoyed', grumpy: 'annoyed', embarrassed: 'shy', flustered: 'shy',
+  sleepy: 'tired', worried: 'scared', nervous: 'scared', thoughtful: 'serious', curious: 'surprised',
+  unimpressed: 'bored', upset: 'sad',
+};
+const MOOD_HOLD = 4;   // seconds a mood stays on her face after she stops talking
+function setMood(ch, value) {
+  const mood = MOOD_ALIASES[value] || value;
+  const em = ch.vrm.expressionManager;
+  const mix = (MOODS[mood] || []).find(m => m.every(([name]) => em?.getExpression(name))) || [];
+  ch.mood = mix.length ? mood : null;
+  ch.moodTargets = new Map(mix);
+  ch.moodUntil = Infinity;   // until the reply is over
+}
+function updateMood(ch, dt, now) {
+  const em = ch.vrm.expressionManager;
+  if (!em) return;
+  ch.moodWeights ??= new Map();
+  ch.moodTargets ??= new Map();
+  if (ch.moodTargets.size && now > ch.moodUntil) { ch.moodTargets = new Map(); ch.mood = null; }
+  const k = Math.min(1, dt * 6);
+  for (const name of new Set([...ch.moodWeights.keys(), ...ch.moodTargets.keys()])) {
+    const current = ch.moodWeights.get(name) ?? 0, target = ch.moodTargets.get(name) ?? 0;
+    const w = current + (target - current) * k;
+    if (!target && w < 0.005) { ch.moodWeights.delete(name); em.setValue(name, 0); }
+    else { ch.moodWeights.set(name, w); em.setValue(name, w); }
+  }
+}
+
+// The eyes look at the camera (the person in front of the screen), with small
+// glances now and then, and up to the side while thinking.
+const gaze = new THREE.Object3D();
+scene.add(gaze);
+const gazeOffset = new THREE.Vector3(), gazeGlance = new THREE.Vector3(), THINKING_GAZE = new THREE.Vector3(-0.35, 0.3, 0);
+let nextGlance = 0;
+function updateGaze(dt, now) {
+  const dist = active ? camera.position.distanceTo(active.root.position) : 2;
+  if (now > nextGlance) {
+    gazeGlance.set((Math.random() - 0.5) * 0.08, (Math.random() - 0.5) * 0.05, 0);
+    nextGlance = now + 1.5 + Math.random() * 3;
+  }
+  gazeOffset.lerp(lastPhase === 'thinking' ? THINKING_GAZE : gazeGlance, Math.min(1, dt * 8));
+  gaze.position.copy(gazeOffset).multiplyScalar(dist).applyQuaternion(camera.quaternion).add(camera.position);
+}
+
 // ---------- live data ----------
 let lastPhase = 'idle';
 const envelope = [];
@@ -867,7 +938,9 @@ function onMessage(msg) {
     case 'phase':
       lastPhase = msg.value;
       if (active) playFor(active, phaseAnimation(msg.value));
+      if (active && msg.value !== 'replying' && active.moodUntil === Infinity) active.moodUntil = now + MOOD_HOLD;
       break;
+    case 'mood': if (active) setMood(active, msg.value); break;
     case 'wake':
       if (active) { const greet = find(active, /bow|wave|greet/i); if (greet) play(active, greet, 0.3); }
       break;
@@ -897,6 +970,7 @@ renderer.setAnimationLoop(() => {
 
   roomMixer?.update(dt);
   if (editing) orbit.update();
+  updateGaze(dt, now);
   for (const ch of characters.values()) {
     if (!ch.root.visible) continue;
     ch.mixer.update(dt);
@@ -909,11 +983,12 @@ renderer.setAnimationLoop(() => {
       em?.setValue('blink', Math.sin(Math.min(blinkT / 0.15, 1) * Math.PI));
       if (blinkT > 0.15) { blinkT = -1; em?.setValue('blink', 0); }
     }
+    updateMood(ch, dt, now);
     ch.vrm.update(dt);
   }
   if (debugOn) {
     debugEl.style.display = 'block';
-    debugEl.textContent = `persona  ${activePersona}\nphase    ${lastPhase}\nanim     ${active?.current}\nmouth    ${mouth.toFixed(2)}\nroom     ${layout.room?.file || '-'}\nspots    ${(layout.spots || []).length}`;
+    debugEl.textContent = `persona  ${activePersona}\nphase    ${lastPhase}\nanim     ${active?.current}\nmood     ${active?.mood || '-'}\nmouth    ${mouth.toFixed(2)}\nroom     ${layout.room?.file || '-'}\nspots    ${(layout.spots || []).length}`;
   } else debugEl.style.display = 'none';
   renderer.render(scene, camera);
 });

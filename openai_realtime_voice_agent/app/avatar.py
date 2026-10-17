@@ -8,6 +8,7 @@ streams what the page needs to animate:
   {"type": "phase", "value": "listening" | "thinking" | "replying" | "idle"}
   {"type": "persona", "value": "<name>"}
   {"type": "wake"} / {"type": "interrupt"}
+  {"type": "mood", "value": "<mood>"}               from the second persona's [mood] tags
   {"type": "env", "dt": 0.02, "values": [...]}       loudness of the reply audio,
                                                       one value per 20 ms, for lip-sync
 
@@ -26,11 +27,18 @@ import json
 import logging
 import math
 import pathlib
+import re
 import shutil
 from array import array
 
 from aiohttp import WSMsgType, web
-from pipecat.frames.frames import Frame, OutputAudioRawFrame
+from pipecat.frames.frames import (
+    Frame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    LLMTextFrame,
+    OutputAudioRawFrame,
+)
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 logger = logging.getLogger(__name__)
@@ -42,6 +50,19 @@ MEDIA_DIRS = (UPLOAD_DIR, pathlib.Path("/media"))
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_SUFFIXES = {".vrm", ".fbx", ".vrma", ".glb", ".png", ".jpg", ".jpeg"}
 ENVELOPE_STEP_S = 0.02
+
+# Added to the second persona's instructions: a mood tag the avatar shows as a
+# facial expression. MoodTags takes the tags out before the voice reads the text.
+MOOD_INSTRUCTIONS = (
+    "\n\n# Facial expression\n"
+    "You have an animated avatar whose face shows your mood. Start every reply with one mood tag in square "
+    "brackets, for example \"[smug] Oh, you need my help again?\". If your mood clearly changes during a reply, "
+    "put a new tag there. The tags are never spoken, so never mention them. Use only these: [neutral] [happy] "
+    "[smug] [teasing] [annoyed] [angry] [bored] [surprised] [shocked] [sad] [shy] [excited] [tired] [serious] "
+    "[confused] [scared]."
+)
+MOOD_TAG = re.compile(r"\[([A-Za-z][A-Za-z _-]{0,19})\]\s*")
+UNFINISHED_TAG = re.compile(r"\[[A-Za-z _-]{0,20}$")
 
 
 class AvatarHub:
@@ -215,6 +236,46 @@ class AvatarHub:
 
 
 HUB = AvatarHub()
+
+
+class MoodTags(FrameProcessor):
+    """Takes "[mood]" tags out of text-mode replies and sends them to the avatar pages.
+
+    Sits right after the realtime service, so the transcript, the follow-up
+    question check and the ElevenLabs voice all get the text without tags. A tag
+    can be split over several text chunks, so an unfinished "[..." is held back
+    until it closes (or the reply ends).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._held = ""
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if direction != FrameDirection.DOWNSTREAM:
+            await self.push_frame(frame, direction)
+            return
+        if isinstance(frame, LLMTextFrame):
+            text, self._held = self._held + frame.text, ""
+            unfinished = UNFINISHED_TAG.search(text)
+            if unfinished:
+                text, self._held = text[: unfinished.start()], text[unfinished.start():]
+            for tag in MOOD_TAG.finditer(text):
+                mood = tag.group(1).strip().lower()
+                logger.info(f"🧍 mood: {mood}")
+                HUB.send({"type": "mood", "value": mood})
+            text = MOOD_TAG.sub("", text)
+            if text:
+                frame.text = text
+                await self.push_frame(frame, direction)
+            return
+        if isinstance(frame, LLMFullResponseStartFrame):
+            self._held = ""
+        elif isinstance(frame, LLMFullResponseEndFrame) and self._held:
+            held, self._held = self._held, ""
+            await self.push_frame(LLMTextFrame(held), direction)
+        await self.push_frame(frame, direction)
 
 
 class AvatarTap(FrameProcessor):
