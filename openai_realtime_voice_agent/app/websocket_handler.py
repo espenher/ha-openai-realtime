@@ -22,7 +22,7 @@ from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
 from app.phase_emitter import PhaseEmitter, STALE_AUDIO
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
-from app.avatar import HUB as AVATAR, MOOD_INSTRUCTIONS, AvatarTap, MoodTags
+from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap, avatar_instructions
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)
@@ -496,9 +496,9 @@ class WebSocketHandler:
         # must sit BEFORE the assistant context aggregator, which consumes the
         # text frames.
         tts_components = []
-        mood_components = []
+        tag_components = []
         if PERSONA.second_available:
-            mood_components = [MoodTags()]
+            tag_components = [AvatarTags()]
             from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
             tts_components = [
                 TtsGate(),
@@ -527,7 +527,7 @@ class WebSocketHandler:
                 context_aggregator.user(),
                 TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
                 openai_service,
-                *mood_components,
+                *tag_components,
                 assistant_tap,
                 *tts_components,
                 context_aggregator.assistant(),
@@ -536,7 +536,7 @@ class WebSocketHandler:
             pipeline_components.extend([
                 TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
                 openai_service,
-                *mood_components,
+                *tag_components,
                 assistant_tap,
                 *tts_components,
             ])
@@ -822,7 +822,7 @@ class WebSocketHandler:
 
         def _persona_settings(target: str) -> tuple[str, list[str]]:
             if target == SECOND:
-                return PERSONA.second_instructions + MOOD_INSTRUCTIONS, ["text"]
+                return PERSONA.second_instructions + avatar_instructions(), ["text"]
             return main_instructions, ["audio"]
 
         async def _quick_switch_persona(target: str) -> bool:
@@ -847,6 +847,22 @@ class WebSocketHandler:
             return True
 
         self.quick_switch_persona = _quick_switch_persona
+
+        async def _refresh_avatar_instructions() -> None:
+            """The editor saved new moods/gestures: tell the live second-persona session."""
+            if PERSONA_STATE.active != SECOND:
+                return
+            instructions, _ = _persona_settings(SECOND)
+            openai_service._session_properties.instructions = instructions
+            try:
+                await openai_service.send_client_event(openai_rt_events.SessionUpdateEvent(
+                    session=openai_rt_events.SessionProperties(instructions=instructions)
+                ))
+                logger.info("🧍 avatar moods/gestures updated in the live session")
+            except Exception as e:
+                logger.warning(f"🧍 could not update the live session's avatar instructions: {e!r}")
+
+        AVATAR.on_layout_saved = _refresh_avatar_instructions
 
         async def _switch_persona(option: str, greet: bool = True) -> None:
             """Make the persona named by the input_select option active."""

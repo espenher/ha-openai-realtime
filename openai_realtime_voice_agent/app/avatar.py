@@ -8,7 +8,7 @@ streams what the page needs to animate:
   {"type": "phase", "value": "listening" | "thinking" | "replying" | "idle"}
   {"type": "persona", "value": "<name>"}
   {"type": "wake"} / {"type": "interrupt"}
-  {"type": "mood", "value": "<mood>"}               from the second persona's [mood] tags
+  {"type": "tag", "value": "<tag>"}                 a [tag] from the second persona's reply (mood or gesture)
   {"type": "env", "dt": 0.02, "values": [...]}       loudness of the reply audio,
                                                       one value per 20 ms, for lip-sync
 
@@ -51,18 +51,80 @@ MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_SUFFIXES = {".vrm", ".fbx", ".vrma", ".glb", ".png", ".jpg", ".jpeg"}
 ENVELOPE_STEP_S = 0.02
 
-# Added to the second persona's instructions: a mood tag the avatar shows as a
-# facial expression. MoodTags takes the tags out before the voice reads the text.
-MOOD_INSTRUCTIONS = (
-    "\n\n# Facial expression\n"
-    "You have an animated avatar whose face shows your mood. Start every reply with one mood tag in square "
-    "brackets, for example \"[smug] Oh, you need my help again?\". If your mood clearly changes during a reply, "
-    "put a new tag there. The tags are never spoken, so never mention them. Use only these: [neutral] [happy] "
-    "[smug] [teasing] [annoyed] [angry] [bored] [surprised] [shocked] [sad] [shy] [excited] [tired] [serious] "
-    "[confused] [scared]."
-)
-MOOD_TAG = re.compile(r"\[([A-Za-z][A-Za-z _-]{0,19})\]\s*")
-UNFINISHED_TAG = re.compile(r"\[[A-Za-z _-]{0,20}$")
+# What the second persona's avatar can do: moods (a facial expression that stays)
+# and gestures (an animation played once). The room editor saves an edited copy
+# in layout.json ("actions"); until then these defaults apply. The same list
+# drives the page and the instructions below, so the model only ever hears
+# about things the avatar can actually show.
+#   mood:    "face" = [[expression, weight], ...] from the model's own expressions
+#   gesture: "animation" = an animation file's name without its extension
+DEFAULT_ACTIONS = [
+    {"tag": "neutral", "kind": "mood", "face": [], "note": "calm, matter-of-fact"},
+    {"tag": "happy", "kind": "mood", "face": [["happy", 0.55], ["relaxed", 0.4]], "note": "glad, pleased, cheerful"},
+    {"tag": "smug", "kind": "mood", "face": [["Confident", 0.9]], "note": "pleased with yourself, superior, told-you-so"},
+    {"tag": "teasing", "kind": "mood", "face": [["Confident", 0.6], ["relaxed", 0.4]], "note": "playfully mocking"},
+    {"tag": "annoyed", "kind": "mood", "face": [["Sulk", 1]], "note": "irritated, unimpressed"},
+    {"tag": "angry", "kind": "mood", "face": [["angry", 1]], "note": "really cross"},
+    {"tag": "bored", "kind": "mood", "face": [["Meh", 0.9]], "note": "uninterested, whatever"},
+    {"tag": "surprised", "kind": "mood", "face": [["eyeWideLeft", 1], ["eyeWideRight", 1], ["browInnerUp", 1],
+                                                  ["mouthFunnel", 0.4], ["jawOpen", 0.1]], "note": "caught off guard"},
+    {"tag": "shocked", "kind": "mood", "face": [["Shock", 0.8]], "note": "genuinely stunned"},
+    {"tag": "sad", "kind": "mood", "face": [["Sorrow", 0.9]], "note": "sad or sympathetic"},
+    {"tag": "shy", "kind": "mood", "face": [["Shy", 1], ["relaxed", 0.3]], "note": "flustered, embarrassed, complimented"},
+    {"tag": "excited", "kind": "mood", "face": [["Sparkly_Eyes", 1], ["relaxed", 0.5]], "note": "thrilled, enthusiastic"},
+    {"tag": "tired", "kind": "mood", "face": [["Exhausted", 0.6]], "note": "sleepy, worn out"},
+    {"tag": "serious", "kind": "mood", "face": [["Serious", 0.5]], "note": "focused, explaining something important"},
+    {"tag": "confused", "kind": "mood", "face": [["Guruguru_Eyes", 0.7]], "note": "puzzled, it makes no sense"},
+    {"tag": "scared", "kind": "mood", "face": [["Fear", 1]], "note": "nervous, worried"},
+    {"tag": "wave", "kind": "gesture", "animation": "Greeting_female", "note": "saying hi or bye"},
+    {"tag": "bow", "kind": "gesture", "animation": "Quick Formal Bow", "note": "a (mock) formal bow, at your service"},
+    {"tag": "peace sign", "kind": "gesture", "animation": "Peace sign", "note": "cute victory pose, nailed it"},
+    {"tag": "shrug", "kind": "gesture", "animation": "Shrugging", "note": "no idea, whatever, not my problem"},
+    {"tag": "thanks", "kind": "gesture", "animation": "Thankful_female", "note": "thanking someone"},
+    {"tag": "loser", "kind": "gesture", "animation": "L_on_forehead", "note": "mocking someone who failed"},
+    {"tag": "dejected", "kind": "gesture", "animation": "Rejected_female", "note": "turned down, disappointed"},
+    {"tag": "finger guns", "kind": "gesture", "animation": "Shoot", "note": "playful bang, gotcha"},
+    {"tag": "spin", "kind": "gesture", "animation": "Spin", "note": "a happy twirl"},
+    {"tag": "pose", "kind": "gesture", "animation": "Model pose", "note": "posing, showing off"},
+    {"tag": "show outfit", "kind": "gesture", "animation": "Show full body", "note": "showing off your outfit"},
+]
+TAG = re.compile(r"\[([A-Za-z][A-Za-z _-]{0,23})\]\s*")
+UNFINISHED_TAG = re.compile(r"\[[A-Za-z _-]{0,24}$")
+
+
+def _saved_layout() -> dict:
+    try:
+        return json.loads((UPLOAD_DIR / "layout.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def avatar_actions() -> list[dict]:
+    """The avatar's moods and gestures: the room editor's saved list, or the defaults."""
+    actions = _saved_layout().get("actions")
+    return actions if isinstance(actions, list) else DEFAULT_ACTIONS
+
+
+def avatar_instructions() -> str:
+    """The part of the second persona's instructions that explains the avatar tags."""
+    actions = avatar_actions()
+    animations = {p.stem for d in MEDIA_DIRS if d.is_dir() for p in d.iterdir()
+                  if p.suffix.lower() in (".fbx", ".vrma")}
+    moods = [a for a in actions if a.get("kind") == "mood" and a.get("tag")]
+    gestures = [a for a in actions if a.get("kind") == "gesture" and a.get("tag") and a.get("animation") in animations]
+    if not moods and not gestures:
+        return ""
+    line = lambda a: f"[{a['tag']}] {a.get('note', '')}".rstrip()
+    parts = ["\n\n# Your avatar\n"
+             "You have an animated avatar. Control it with tags in square brackets inside your replies. Tags are "
+             "never spoken, so never mention them, and only use the ones listed here."]
+    if moods:
+        parts.append("\n\nMoods (your facial expression; it stays until you change it). Start every reply with "
+                     "one, and put a new one mid-reply when your mood shifts:\n" + "\n".join(map(line, moods)))
+    if gestures:
+        parts.append("\n\nGestures (a short animation, played once where you put the tag). Use one only when it "
+                     "really fits, at most one or two per reply:\n" + "\n".join(map(line, gestures)))
+    return "".join(parts)
 
 
 class AvatarHub:
@@ -71,6 +133,9 @@ class AvatarHub:
     def __init__(self) -> None:
         self._clients: set[web.WebSocketResponse] = set()
         self._state = {"phase": "idle", "persona": None}
+        # Set by the websocket handler: refreshes the live session's instructions
+        # when the editor saves new moods/gestures.
+        self.on_layout_saved = None
 
     # ---------- server ----------
     async def start(self, port: int) -> None:
@@ -82,6 +147,7 @@ class AvatarHub:
         app.router.add_put("/files/{name}", self._upload)
         app.router.add_delete("/files/{name}", self._delete)
         app.router.add_get("/layout", self._get_layout)
+        app.router.add_get("/actions", self._get_actions)
         app.router.add_put("/layout", self._put_layout)
         app.router.add_get("/ws", self._ws)
         runner = web.AppRunner(app, access_log=None)
@@ -174,6 +240,9 @@ class AvatarHub:
         return web.Response(text=path.read_text(encoding="utf-8"), content_type="application/json",
                             headers={"Cache-Control": "no-cache"})
 
+    async def _get_actions(self, request: web.Request) -> web.Response:
+        return web.json_response({"actions": avatar_actions(), "defaults": DEFAULT_ACTIONS})
+
     async def _put_layout(self, request: web.Request) -> web.Response:
         try:
             layout = await request.json()
@@ -187,6 +256,8 @@ class AvatarHub:
         tmp.replace(UPLOAD_DIR / "layout.json")
         logger.info("🧍 Avatar room layout saved")
         self.send({"type": "layout"})
+        if self.on_layout_saved:
+            await self.on_layout_saved()
         return web.json_response({"saved": True})
 
     async def _ws(self, request: web.Request) -> web.WebSocketResponse:
@@ -238,8 +309,8 @@ class AvatarHub:
 HUB = AvatarHub()
 
 
-class MoodTags(FrameProcessor):
-    """Takes "[mood]" tags out of text-mode replies and sends them to the avatar pages.
+class AvatarTags(FrameProcessor):
+    """Takes "[tag]" moods and gestures out of text-mode replies and sends them to the avatar pages.
 
     Sits right after the realtime service, so the transcript, the follow-up
     question check and the ElevenLabs voice all get the text without tags. A tag
@@ -261,11 +332,11 @@ class MoodTags(FrameProcessor):
             unfinished = UNFINISHED_TAG.search(text)
             if unfinished:
                 text, self._held = text[: unfinished.start()], text[unfinished.start():]
-            for tag in MOOD_TAG.finditer(text):
-                mood = tag.group(1).strip().lower()
-                logger.info(f"🧍 mood: {mood}")
-                HUB.send({"type": "mood", "value": mood})
-            text = MOOD_TAG.sub("", text)
+            for tag in TAG.finditer(text):
+                value = tag.group(1).strip().lower()
+                logger.info(f"🧍 tag: {value}")
+                HUB.send({"type": "tag", "value": value})
+            text = TAG.sub("", text)
             if text:
                 frame.text = text
                 await self.push_frame(frame, direction)

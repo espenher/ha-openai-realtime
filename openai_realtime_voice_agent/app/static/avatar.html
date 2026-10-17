@@ -35,6 +35,12 @@
   .swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid #1b1d22; padding: 0;
             box-shadow: 0 0 0 1px var(--line); cursor: pointer; }
   .swatch.on { box-shadow: 0 0 0 2px var(--accent); }
+  #actions summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .act { border: 1px solid var(--line); border-radius: 8px; padding: 6px; display: flex; flex-direction: column; gap: 4px;
+         margin-top: 6px; }
+  .act input.tag { font-weight: 600; }
+  .act input.w { width: 64px; flex: 0 0 64px; }
+  .act button.x { padding: 4px 7px; }
   #wardrobe label { display: flex; gap: 5px; align-items: center; background: #2b2f38; border: 1px solid var(--line);
                     border-radius: 6px; padding: 4px 8px; cursor: pointer; }
   button, select, input, label.btn { background: #2b2f38; color: var(--text); border: 1px solid var(--line);
@@ -80,6 +86,13 @@
 
   <h2>Animation</h2>
   <div class="row"><select id="testAnim"></select><button id="playAnim">▶ Play</button></div>
+  <h2>Moods &amp; gestures</h2>
+  <p>Tags Nabu can put in her replies. Moods set her face, gestures play an animation once. The note tells her when
+     to use it. Saved with the room; she knows about changes right away.</p>
+  <details id="actions"><summary></summary><div id="actionList"></div>
+    <div class="row" style="margin-top:6px"><button id="addMood">+ Mood</button><button id="addGesture">+ Gesture</button>
+      <button id="resetActions">Reset to defaults</button></div>
+  </details>
   <h2>Wardrobe</h2>
   <div class="row" id="wardrobe"><p>No separate clothing parts on this model.</p></div>
   <h2>Appearance</h2>
@@ -323,7 +336,8 @@ function phaseAnimation(phase) {
   return /idle/i;
 }
 function playFor(ch, pattern) {
-  const busy = ch.current && ONE_SHOT.test(ch.current) && ch.actions.get(ch.current)?.isRunning();
+  const current = ch.current && ch.actions.get(ch.current);
+  const busy = current && current.loop === THREE.LoopOnce && current.isRunning();
   if (busy) return;
   play(ch, find(ch, pattern) || find(ch, /idle/i));
 }
@@ -347,7 +361,7 @@ function showPersona(persona) {
     active.root.visible = true;
   }
   placeCharacter();
-  if (!editing) applyViewCamera(); else { buildWardrobeUI(); buildAppearanceUI(); buildAnimationUI(); }
+  if (!editing) applyViewCamera(); else { buildWardrobeUI(); buildAppearanceUI(); buildAnimationUI(); buildActionsUI(); }
   playFor(active, phaseAnimation(lastPhase));
 }
 
@@ -388,6 +402,89 @@ function applyWardrobe(ch) {
     }
   }
 }
+// The editor works on a copy of the catalogue; the first change makes it the
+// layout's own list (until then the add-on's defaults keep applying).
+function editableActions() {
+  workActions ??= structuredClone(catalogue);
+  return workActions;
+}
+function actionsChanged() {
+  layout.actions = catalogue = editableActions();
+  $('actions').querySelector('summary').textContent = summaryText();
+}
+const summaryText = () => {
+  const list = workActions || catalogue;
+  const moods = list.filter(a => a.kind !== 'gesture').length;
+  return `${moods} moods, ${list.length - moods} gestures${Array.isArray(layout.actions) ? '' : ' (defaults)'}`;
+};
+function el(tag, props = {}, ...children) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...children);
+  return e;
+}
+function buildActionsUI() {
+  $('actions').querySelector('summary').textContent = summaryText();
+  const list = $('actionList');
+  list.innerHTML = '';
+  const expressions = active?.vrm.expressionManager?.expressions.map(e => e.expressionName) || [];
+  const animations = active ? [...active.actions.keys()] : [];
+  for (const a of editableActions()) {
+    const box = el('div', { className: 'act' });
+    const tag = el('input', { type: 'text', className: 'tag', value: a.tag, placeholder: 'tag' });
+    tag.onchange = () => { a.tag = tag.value.trim(); actionsChanged(); };
+    const kind = el('span', { textContent: a.kind === 'gesture' ? 'gesture' : 'mood' });
+    kind.style.cssText = 'color: var(--muted); font-size: 12px';
+    const test = el('button', { textContent: '▶', title: 'Try it' });
+    test.onclick = () => {
+      if (!active) return;
+      if (a.kind === 'gesture') playGesture(active, a.animation);
+      else { setMood(active, a); active.moodUntil = performance.now() / 1000 + 3; }
+    };
+    const remove = el('button', { textContent: '✕', className: 'x danger', title: 'Remove' });
+    remove.onclick = () => { editableActions().splice(editableActions().indexOf(a), 1); actionsChanged(); buildActionsUI(); };
+    box.append(el('div', { className: 'row' }, tag, kind, test, remove));
+    if (a.kind === 'gesture') {
+      const anim = el('select');
+      fillSelect(anim, [...new Set([a.animation, ...animations].filter(Boolean))], a.animation);
+      anim.onchange = () => { a.animation = anim.value; actionsChanged(); };
+      box.append(el('div', { className: 'row' }, anim));
+    } else {
+      a.face ??= [];
+      a.face.forEach((part, i) => {
+        const expr = el('select');
+        fillSelect(expr, [...new Set([part[0], ...expressions])], part[0]);
+        expr.onchange = () => { part[0] = expr.value; actionsChanged(); };
+        const w = el('input', { type: 'number', className: 'w', min: 0, max: 1, step: 0.05, value: part[1] });
+        w.onchange = () => { part[1] = Math.max(0, Math.min(1, Number(w.value) || 0)); actionsChanged(); };
+        const x = el('button', { textContent: '✕', className: 'x', title: 'Remove this expression' });
+        x.onclick = () => { a.face.splice(i, 1); actionsChanged(); buildActionsUI(); };
+        box.append(el('div', { className: 'row' }, expr, w, x));
+      });
+      const add = el('button', { textContent: '+ expression' });
+      add.onclick = () => { a.face.push([expressions[0] || 'happy', 1]); actionsChanged(); buildActionsUI(); };
+      box.append(el('div', { className: 'row' }, add));
+    }
+    const note = el('input', { type: 'text', value: a.note || '', placeholder: 'when to use it' });
+    note.onchange = () => { a.note = note.value.trim(); actionsChanged(); };
+    box.append(el('div', { className: 'row' }, note));
+    list.appendChild(box);
+  }
+}
+$('addMood').onclick = () => {
+  editableActions().push({ tag: 'new mood', kind: 'mood', face: [], note: '' });
+  actionsChanged(); buildActionsUI();
+};
+$('addGesture').onclick = () => {
+  editableActions().push({ tag: 'new gesture', kind: 'gesture', animation: active ? [...active.actions.keys()][0] : '', note: '' });
+  actionsChanged(); buildActionsUI();
+};
+$('resetActions').onclick = () => {
+  delete layout.actions;
+  catalogue = defaultActions;
+  workActions = null;
+  buildActionsUI();
+};
+
 function buildAnimationUI() {
   fillSelect($('testAnim'), active ? [...active.actions.keys()] : [], active?.current ?? undefined);
 }
@@ -616,6 +713,7 @@ function applyViewCamera() {
 
 async function loadLayout() {
   layout = await (await fetch('layout', { cache: 'no-store' })).json();
+  await loadCatalogue();
   await loadRoom();
   await loadItems();
   loadSpots();
@@ -647,6 +745,7 @@ function setEditing(on) {
     buildWardrobeUI();
     buildAppearanceUI();
     buildAnimationUI();
+    buildActionsUI();
   } else {
     select(null);
     applyViewCamera();
@@ -851,30 +950,18 @@ async function boot() {
   connect();
 }
 
-// ---------- facial expressions and gaze ----------
-// Nabu's replies carry a mood tag ("[smug] ..."); the add-on takes it out
-// before her voice reads the text and sends it here. Each mood is a mix of the
-// model's own expressions: the first mix whose expressions all exist on the
-// model is used, so a model with only the standard VRM set still gets close.
-const MOODS = {
-  happy:     [[['happy', 0.55], ['relaxed', 0.4]]],
-  smug:      [[['Confident', 0.9]], [['relaxed', 0.7]]],
-  teasing:   [[['Confident', 0.6], ['relaxed', 0.4]], [['relaxed', 0.8]]],
-  annoyed:   [[['Sulk', 1]], [['angry', 0.4]]],
-  angry:     [[['angry', 1]]],
-  bored:     [[['Meh', 0.9]], [['relaxed', 0.3]]],
-  surprised: [[['eyeWideLeft', 1], ['eyeWideRight', 1], ['browInnerUp', 1], ['mouthFunnel', 0.4], ['jawOpen', 0.1]],
-              [['surprised', 0.8]]],
-  shocked:   [[['Shock', 0.8]], [['surprised', 1]]],
-  sad:       [[['Sorrow', 0.9]], [['sad', 0.8]]],
-  shy:       [[['Shy', 1], ['relaxed', 0.3]], [['relaxed', 0.6]]],
-  excited:   [[['Sparkly_Eyes', 1], ['relaxed', 0.5]], [['happy', 0.8]]],
-  tired:     [[['Exhausted', 0.6]], [['relaxed', 0.5]]],
-  serious:   [[['Serious', 0.5]], [['angry', 0.2]]],
-  confused:  [[['Guruguru_Eyes', 0.7]], [['surprised', 0.3]]],
-  scared:    [[['Fear', 1]], [['surprised', 0.6], ['sad', 0.3]]],
-};
-// Moods the model may use even though they aren't in its list.
+// ---------- moods, gestures and gaze ----------
+// Nabu puts tags in her replies ("[smug] Oh, you again? [shrug] Whatever.");
+// the add-on takes them out before her voice reads the text and sends them
+// here. What each tag does comes from the catalogue: the room editor's saved
+// list (layout.actions) or the add-on's defaults. The add-on builds her
+// instructions from the same list, so she only uses tags that exist.
+//   mood:    face = [[expression, weight], ...]: held while she talks, fades after
+//   gesture: animation = an animation's name: played once, then back to talking
+let defaultActions = [], catalogue = [], workActions = null;
+const normTag = t => String(t || '').toLowerCase().replace(/[ _-]+/g, ' ').trim();
+const findAction = tag => catalogue.find(a => normTag(a.tag) === normTag(tag));
+// Moods she may use even though they aren't in her list.
 const MOOD_ALIASES = {
   sarcastic: 'smug', proud: 'smug', playful: 'teasing', amused: 'teasing', cheerful: 'happy', glad: 'happy',
   delighted: 'excited', irritated: 'annoyed', grumpy: 'annoyed', embarrassed: 'shy', flustered: 'shy',
@@ -882,13 +969,32 @@ const MOOD_ALIASES = {
   unimpressed: 'bored', upset: 'sad',
 };
 const MOOD_HOLD = 4;   // seconds a mood stays on her face after she stops talking
-function setMood(ch, value) {
-  const mood = MOOD_ALIASES[value] || value;
+async function loadCatalogue() {
+  try { defaultActions = (await (await fetch('actions', { cache: 'no-store' })).json()).defaults || []; }
+  catch (e) { console.warn('actions', e); }
+  catalogue = Array.isArray(layout.actions) ? layout.actions : defaultActions;
+  workActions = null;
+}
+function onTag(ch, tag) {
+  const action = findAction(tag) || findAction(MOOD_ALIASES[normTag(tag)]);
+  if (!action) return;
+  if (action.kind === 'gesture') playGesture(ch, action.animation);
+  else setMood(ch, action);
+}
+function setMood(ch, action) {
   const em = ch.vrm.expressionManager;
-  const mix = (MOODS[mood] || []).find(m => m.every(([name]) => em?.getExpression(name))) || [];
-  ch.mood = mix.length ? mood : null;
-  ch.moodTargets = new Map(mix);
+  const face = (action.face || []).filter(([name]) => em?.getExpression(name));
+  ch.mood = action.tag;
+  ch.moodTargets = new Map(face);
   ch.moodUntil = Infinity;   // until the reply is over
+}
+function playGesture(ch, name) {
+  const action = ch.actions.get(name);
+  if (!action) return;
+  action.setLoop(THREE.LoopOnce, 1);
+  action.clampWhenFinished = true;
+  if (ch.current === name) ch.current = null;   // play it again from the start
+  play(ch, name, 0.3);
 }
 function updateMood(ch, dt, now) {
   const em = ch.vrm.expressionManager;
@@ -940,7 +1046,7 @@ function onMessage(msg) {
       if (active) playFor(active, phaseAnimation(msg.value));
       if (active && msg.value !== 'replying' && active.moodUntil === Infinity) active.moodUntil = now + MOOD_HOLD;
       break;
-    case 'mood': if (active) setMood(active, msg.value); break;
+    case 'tag': if (active) onTag(active, msg.value); break;
     case 'wake':
       if (active) { const greet = find(active, /bow|wave|greet/i); if (greet) play(active, greet, 0.3); }
       break;
