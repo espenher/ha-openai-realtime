@@ -728,6 +728,17 @@ async function loadLayout() {
   placeCharacter();
   if (!editing) applyViewCamera();
 }
+// While the editor is open a full reload would throw away unsaved edits, but
+// Nabu changing her own clothes or colours should still show (and be kept when
+// the room is saved): take just those from the saved layout.
+async function mergeBodyState() {
+  const saved = await (await fetch('layout', { cache: 'no-store' })).json();
+  layout.wardrobe = saved.wardrobe || {};
+  layout.appearance = saved.appearance || {};
+  for (const ch of characters.values()) { applyWardrobe(ch); applyAppearance(ch); }
+  buildWardrobeUI();
+  buildAppearanceUI();
+}
 
 // ---------- editor ----------
 let editing = false, selected = null;
@@ -1068,7 +1079,10 @@ function onMessage(msg) {
       break;
     }
     case 'interrupt': envelope.length = 0; break;
-    case 'layout': if (!editing) loadLayout(); break;
+    case 'layout':
+      if (!editing) loadLayout();
+      else mergeBodyState().catch(e => console.warn('layout', e));
+      break;
     case 'env':
       if (envCursor < now) envCursor = now + MOUTH_DELAY;
       for (const v of msg.values) { envelope.push({ t: envCursor, v }); envCursor += msg.dt; }
