@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 GARMENT = re.compile(r"^Outfit_([A-Za-z]+?)\d*$")
 VARIANT = re.compile(r"^(.+?)__(.+?)__(\d+)-(.+)_([0-9a-f]{6})\.(png|jpe?g)$", re.I)
 # Clothes she can take off and put back on herself; the rest of the outfit stays on.
-CHANGEABLE = {"jacket": "Jacket", "tie": "Tie", "socks": "Sock", "sneakers": "Sneaker"}
+CHANGEABLE = {"jacket": "Jacket", "tie": "Tie", "socks": "Sock", "sneakers": "Sneaker", "shirt": "Shirt", "skirt": "Skirt", "stripes": "UnderwearBottom", "tankie": "UnderwearTop"}
 GARMENT_WORDS = {"Jacket": "jacket", "Shirt": "shirt", "Skirt": "skirt", "Sneaker": "sneakers", "Sock": "socks",
-                 "Tie": "tie"}
+                 "Tie": "tie", "UnderwearBottom": "stripes", "UnderwearTop": "tankie"}
 # Colour variant textures she can switch, by what they colour.
 COLOUR_SLOTS = {"hair": "Hair_BaseColor", "eyes": "Body_BaseColor", "jacket": "Outfit2_BaseColor"}
 # Rough colour names for the variants' swatch colours.
