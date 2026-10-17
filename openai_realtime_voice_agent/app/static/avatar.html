@@ -181,18 +181,23 @@ for (const side of ['Left', 'Right']) {
   }
 }
 
+// Mixamo numbers the skeleton when a motion was downloaded for an uploaded
+// character ("mixamorig1:Hips", "mixamorig7:Hips"); three.js drops the colon.
+const mixamoBone = name => name.replace(/^mixamorig\d+/, 'mixamorig');
 function retarget(asset, vrm) {
   const clip = THREE.AnimationClip.findByName(asset.animations, 'mixamo.com');
   const tracks = [];
   const restInv = new THREE.Quaternion(), parentRest = new THREE.Quaternion(), q = new THREE.Quaternion(), v = new THREE.Vector3();
-  const motionHipsHeight = asset.getObjectByName('mixamorigHips').position.y;
+  let motionHips = null;
+  asset.traverse(o => { if (!motionHips && mixamoBone(o.name) === 'mixamorigHips') motionHips = o; });
+  const motionHipsHeight = motionHips.position.y;
   const vrmHipsY = vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(v).y;
   const vrmRootY = vrm.scene.getWorldPosition(v).y;
   const hipsScale = Math.abs(vrmHipsY - vrmRootY) / motionHipsHeight;
   const vrm0 = vrm.meta?.metaVersion === '0';
   for (const track of clip.tracks) {
     const [rigName, property] = track.name.split('.');
-    const node = vrm.humanoid.getNormalizedBoneNode(mixamoRig[rigName]);
+    const node = vrm.humanoid.getNormalizedBoneNode(mixamoRig[mixamoBone(rigName)]);
     const rigNode = asset.getObjectByName(rigName);
     if (!node || !rigNode) continue;
     rigNode.getWorldQuaternion(restInv).invert();
@@ -202,7 +207,7 @@ function retarget(asset, vrm) {
       for (let i = 0; i < values.length; i += 4) q.fromArray(values, i).premultiply(parentRest).multiply(restInv).toArray(values, i);
       tracks.push(new THREE.QuaternionKeyframeTrack(`${node.name}.${property}`, track.times,
         values.map((x, i) => (vrm0 && i % 2 === 0 ? -x : x))));
-    } else if (track instanceof THREE.VectorKeyframeTrack && rigName === 'mixamorigHips') {
+    } else if (track instanceof THREE.VectorKeyframeTrack && mixamoBone(rigName) === 'mixamorigHips') {
       // Keep the character on its spot: hips may bob up and down, but sideways
       // and forward stay at the model's own rest position, so no animation
       // shifts or walks it out of view.
