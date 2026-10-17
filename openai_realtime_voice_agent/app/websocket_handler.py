@@ -649,6 +649,8 @@ class WebSocketHandler:
         # Set while an announcement (see _announce) is being spoken, so the
         # interrupt / late-audio kill machinery doesn't cancel it.
         _announcing = {"v": False}
+        # When the device last woke (for dropping wake-word scraps, see _on_user_transcript).
+        _last_wake = {"t": 0.0}
 
         async def _on_device_interrupt():
             AVATAR.send({"type": "interrupt"})
@@ -754,6 +756,7 @@ class WebSocketHandler:
             # response (handled in PhaseEmitter via the kill-window callbacks).
             phase_emitter.note_wake()
             phase_emitter.note_device_mic_opened()
+            _last_wake["t"] = time.monotonic()
             _announcing["v"] = False
             # New turn boundary: drop any pending post-tool kill so it can't
             # leak onto this fresh turn's response.
@@ -915,6 +918,18 @@ class WebSocketHandler:
         )
 
         async def _on_user_transcript(text: str):
+            # Saying the wake word straight into the request ("Okay Nabu, I think
+            # I'm getting sick") can make the VAD close a turn on a scrap of the
+            # wake word itself, transcribed as "s.". Its reply talks over the
+            # real request, which then only gets answered afterwards as the next
+            # turn (2026-10-17 13:36). Drop the scrap's reply.
+            if sum(c.isalpha() for c in text) <= 1 and time.monotonic() - _last_wake["t"] < 4.0:
+                try:
+                    await openai_service.send_client_event(openai_rt_events.ResponseCancelEvent())
+                    logger.info(f"🧹 scrap right after the wake word ({text!r}) → response.cancel")
+                except Exception as e:
+                    logger.info(f"🧹 wake-word scrap cancel no-op ({e!r})")
+                return
             if time.monotonic() - _dangling["cancelled_at"] > 5.0:
                 return
             if STALE_AUDIO.active or len(text.split()) < 2:
