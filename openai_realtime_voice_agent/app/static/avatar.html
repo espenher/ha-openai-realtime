@@ -266,7 +266,7 @@ const fbx = new FBXLoader();
 const vrmaLoader = new GLTFLoader();
 vrmaLoader.register(parser => new VRMAnimationLoaderPlugin(parser));
 let animationNames = [];
-const ONE_SHOT = /bow|wave|greet|shrug|nod|thank|reject|forehead|taunt|peace|shoot|spin|pose|squat|full body/i;
+const ONE_SHOT = /bow|wave|greet|shrug|nod|thank|reject|forehead|taunt|peace|shoot|spin|model pose|squat|full body/i;
 const STYLE_DEFAULTS = { nabu: 'female', lola: 'female', jarvis: 'male' };
 const tagged = (name, tag) => new RegExp(`(^|[_ -])${tag}($|[_ .-])`, 'i').test(name);
 const anyStyle = name => tagged(name, 'female') || tagged(name, 'male');
