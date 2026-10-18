@@ -210,6 +210,22 @@ for (const side of ['Left', 'Right']) {
 // Mixamo numbers the skeleton when a motion was downloaded for an uploaded
 // character ("mixamorig1:Hips", "mixamorig7:Hips"); three.js drops the colon.
 const mixamoBone = name => name.replace(/^mixamorig\d+/, 'mixamorig');
+// Keep the character on its spot without freezing her hips: sideways and forward
+// motion is kept relative to the first frame (a dance's sway, which is what keeps
+// her feet planted while her body moves), minus the clip's overall drift from
+// first to last frame (a walk's travel, or a step that doesn't come back), so no
+// animation shifts or walks her out of view. Up and down is kept as it is.
+// `flip` turns the motion round for VRM 0.x models, which face the other way.
+function keepOnSpot(times, values, rest, scale, flip = false) {
+  const last = values.length - 3, span = (times[times.length - 1] - times[0]) || 1;
+  return values.map((x, i) => {
+    const axis = i % 3;
+    if (axis === 1) return x * scale;
+    const along = (times[Math.floor(i / 3)] - times[0]) / span;
+    const drift = (values[last + axis] - values[axis]) * along;
+    return rest.getComponent(axis) + (x - values[axis] - drift) * scale * (flip ? -1 : 1);
+  });
+}
 function retarget(asset, vrm) {
   const clip = THREE.AnimationClip.findByName(asset.animations, 'mixamo.com');
   const tracks = [];
@@ -235,34 +251,142 @@ function retarget(asset, vrm) {
       tracks.push(new THREE.QuaternionKeyframeTrack(`${node.name}.${property}`, track.times,
         values.map((x, i) => (vrm0 && i % 2 === 0 ? -x : x))));
     } else if (property === 'position' && mixamoBone(rigName) === 'mixamorigHips') {
-      // Keep the character on its spot: hips may bob up and down, but sideways
-      // and forward stay at the model's own rest position, so no animation
-      // shifts or walks it out of view.
-      const rest = node.position.clone();
       const v = track.values, last = v.length - 3;
       if (clip.duration > 0) travelSpeed = Math.hypot(v[last] - v[0], v[last + 2] - v[2]) * hipsScale / clip.duration;
       tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.${property}`, track.times,
-        track.values.map((x, i) => {
-          const axis = i % 3;
-          return axis === 0 ? rest.x : axis === 2 ? rest.z : x * hipsScale;
-        })));
+        keepOnSpot(track.times, v, node.position, hipsScale, vrm0)));
     }
   }
   const result = new THREE.AnimationClip(clip.name, clip.duration, tracks);
   result.travelSpeed = travelSpeed;
+  try { plantFeet(result, asset, clip, vrm, motionHips, hipsScale, vrm0); }
+  catch (e) { console.warn('plantFeet', clip.name, e); }
   return result;
 }
 
+// Copying the motion's joint angles puts her feet where the motion's skeleton has
+// them only if the two skeletons are built alike, and they never quite are: a foot
+// the animation keeps planted slides about by centimetres. So her legs are bent
+// afresh for every frame to put each ankle where the motion's ankle goes, measured
+// from where it starts, scaled and kept on the spot exactly like the hips
+// (keepOnSpot), with each foot turned as the motion turns it.
+function plantFeet(result, asset, clip, vrm, motionHips, hipsScale, flip) {
+  const humanoid = vrm.humanoid;
+  const hipsNode = humanoid.getNormalizedBoneNode('hips');
+  const hipsTrack = result.tracks.find(t => t.name === `${hipsNode.name}.position`);
+  const motionTrack = clip.tracks.find(t => t.name.endsWith('.position') && mixamoBone(t.name.split('.')[0]) === 'mixamorigHips');
+  if (!hipsTrack || !motionTrack || hipsTrack.times.length < 2) return;
+  const sourceBone = name => { let hit = null; asset.traverse(o => { if (!hit && mixamoBone(o.name) === name) hit = o; }); return hit; };
+  const legs = ['left', 'right'].map(side => ({
+    upper: humanoid.getNormalizedBoneNode(`${side}UpperLeg`),
+    lower: humanoid.getNormalizedBoneNode(`${side}LowerLeg`),
+    foot: humanoid.getNormalizedBoneNode(`${side}Foot`),
+    source: sourceBone(side === 'left' ? 'mixamorigLeftFoot' : 'mixamorigRightFoot'),
+  }));
+  if (legs.some(l => !l.upper || !l.lower || !l.foot || !l.source)) return;
+  const times = hipsTrack.times, span = (times[times.length - 1] - times[0]) || 1;
+  const mv = motionTrack.values, last = mv.length - 3;
+  const drift = new THREE.Vector3(mv[last] - mv[0], 0, mv[last + 2] - mv[2]);
+
+  // Where the motion's ankles go, in the space its hips move in.
+  const pose = root => { const saved = []; root.traverse(o => saved.push([o, o.position.clone(), o.quaternion.clone(), o.scale.clone()])); return saved; };
+  const restore = saved => { for (const [o, position, quaternion, scale] of saved) { o.position.copy(position); o.quaternion.copy(quaternion); o.scale.copy(scale); } };
+  const play = (root, c) => {
+    const mixer = new THREE.AnimationMixer(root);
+    mixer.clipAction(c).setLoop(THREE.LoopOnce, 1).play().clampWhenFinished = true;
+    return mixer;
+  };
+  const assetPose = pose(asset);
+  const sourceMixer = play(asset, clip);
+  const goals = legs.map(() => []);
+  for (const t of times) {
+    sourceMixer.setTime(t);
+    asset.updateMatrixWorld(true);
+    legs.forEach((l, i) => goals[i].push(motionHips.parent.worldToLocal(l.source.getWorldPosition(new THREE.Vector3()))));
+  }
+  sourceMixer.stopAllAction();
+  sourceMixer.uncacheRoot(asset);
+  restore(assetPose);
+  asset.updateMatrixWorld(true);
+
+  // Her legs, frame by frame.
+  const rigRoot = hipsNode.parent;
+  const vrmPose = pose(rigRoot);
+  const mixer = play(vrm.scene, result);
+  const forward = new THREE.Vector3(0, 0, flip ? -1 : 1);
+  const values = legs.map(() => ({ upper: [], lower: [], foot: [] }));
+  const starts = [];
+  times.forEach((t, k) => {
+    mixer.setTime(t);
+    rigRoot.updateMatrixWorld(true);
+    const along = (t - times[0]) / span;
+    legs.forEach((l, i) => {
+      if (k === 0) starts[i] = rigRoot.worldToLocal(l.foot.getWorldPosition(new THREE.Vector3()));
+      const move = goals[i][k].clone().sub(goals[i][0]).addScaledVector(drift, -along).multiplyScalar(hipsScale);
+      if (flip) { move.x = -move.x; move.z = -move.z; }
+      const target = rigRoot.localToWorld(starts[i].clone().add(move));
+      const footTurn = l.foot.getWorldQuaternion(new THREE.Quaternion());
+      if (k > 0) {
+        const bendAxis = new THREE.Vector3(0, 1, 0).cross(rigRoot.localToWorld(forward.clone()).sub(rigRoot.getWorldPosition(new THREE.Vector3())));
+        reachWith(l, target, bendAxis);
+        turnTo(l.foot, footTurn);
+      }
+      values[i].upper.push(...l.upper.quaternion.toArray());
+      values[i].lower.push(...l.lower.quaternion.toArray());
+      values[i].foot.push(...l.foot.quaternion.toArray());
+    });
+  });
+  mixer.stopAllAction();
+  mixer.uncacheRoot(vrm.scene);
+  restore(vrmPose);
+  rigRoot.updateMatrixWorld(true);
+
+  const replaced = new Set(legs.flatMap(l => [l.upper, l.lower, l.foot].map(n => `${n.name}.quaternion`)));
+  result.tracks = result.tracks.filter(t => !replaced.has(t.name));
+  legs.forEach((l, i) => {
+    for (const part of ['upper', 'lower', 'foot'])
+      result.tracks.push(new THREE.QuaternionKeyframeTrack(`${l[part].name}.quaternion`, times, values[i][part]));
+  });
+}
+
+// Turn a bone so its world rotation becomes `world`, or by `by` in world space.
+function turnTo(node, world) {
+  node.quaternion.copy(node.parent.getWorldQuaternion(new THREE.Quaternion()).invert().multiply(world));
+  node.updateMatrixWorld(true);
+}
+function turnBy(node, by) {
+  const parent = node.parent.getWorldQuaternion(new THREE.Quaternion());
+  node.quaternion.premultiply(parent.clone().invert().multiply(by).multiply(parent));
+  node.updateMatrixWorld(true);
+}
+// Two-bone IK: bend the knee to the distance the ankle has to be from the hip,
+// keeping the plane it already bends in, then swing the thigh so the ankle lands on
+// the target. `straightAxis` is the bend for a leg that's dead straight.
+function reachWith(leg, target, straightAxis) {
+  const at = n => n.getWorldPosition(new THREE.Vector3());
+  const hip = at(leg.upper), knee = at(leg.lower), ankle = at(leg.foot);
+  const thighV = knee.clone().sub(hip), shinV = ankle.clone().sub(knee);
+  const thigh = thighV.length(), shin = shinV.length();
+  if (thigh < 1e-6 || shin < 1e-6) return;
+  const want = THREE.MathUtils.clamp(target.distanceTo(hip), Math.abs(thigh - shin) + 1e-4, thigh + shin - 1e-4);
+  let axis = thighV.clone().cross(shinV);
+  if (axis.lengthSq() < 1e-12) axis = straightAxis.clone();
+  axis.normalize();
+  const current = thighV.angleTo(shinV);
+  const wanted = Math.PI - Math.acos(THREE.MathUtils.clamp((thigh * thigh + shin * shin - want * want) / (2 * thigh * shin), -1, 1));
+  turnBy(leg.lower, new THREE.Quaternion().setFromAxisAngle(axis, wanted - current));
+  const reach = at(leg.foot).sub(hip).normalize(), aim = target.clone().sub(hip).normalize();
+  turnBy(leg.upper, new THREE.Quaternion().setFromUnitVectors(reach, aim));
+}
+
 // VRM Animation (.vrma) is made for VRM skeletons, so three-vrm-animation maps
-// it directly (including VRM 0.x models). Like the Mixamo clips, the hips keep
-// the model's own sideways/forward position so the character stays on its spot.
+// it directly (including VRM 0.x models). Like the Mixamo clips, the hips are
+// kept on the character's spot (keepOnSpot).
 function vrmaClip(animation, vrm) {
   const clip = createVRMAnimationClip(animation, vrm);
   const hips = vrm.humanoid.getNormalizedBoneNode('hips');
-  const rest = hips.position.clone();
   clip.tracks = clip.tracks.map(track => track.name !== `${hips.name}.position` ? track
-    : new THREE.VectorKeyframeTrack(track.name, track.times,
-        track.values.map((x, i) => (i % 3 === 0 ? rest.x : i % 3 === 2 ? rest.z : x))));
+    : new THREE.VectorKeyframeTrack(track.name, track.times, keepOnSpot(track.times, track.values, hips.position, 1)));
   return clip;
 }
 
