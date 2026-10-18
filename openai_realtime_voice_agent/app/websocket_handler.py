@@ -508,24 +508,24 @@ class WebSocketHandler:
         # must sit BEFORE the assistant context aggregator, which consumes the
         # text frames.
         tts_components = []
+        tts_service = None
         tag_components = []
         if PERSONA.second_available:
             tag_components = [AvatarTags()]
             from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
-            tts_components = [
-                TtsGate(),
-                ElevenLabsTTSService(
-                    api_key=PERSONA.elevenlabs_api_key,
-                    voice_id=PERSONA.elevenlabs_voice_id,
-                    model=PERSONA.elevenlabs_model,
-                    sample_rate=24000,
-                    params=ElevenLabsTTSService.InputParams(
-                        stability=PERSONA.stability,
-                        style=PERSONA.style,
-                        speed=PERSONA.speed,
-                    ),
+            from app.elevenlabs_tts import SafeElevenLabsTTSService
+            tts_service = SafeElevenLabsTTSService(
+                api_key=PERSONA.elevenlabs_api_key,
+                voice_id=PERSONA.elevenlabs_voice_id,
+                model=PERSONA.elevenlabs_model,
+                sample_rate=24000,
+                params=ElevenLabsTTSService.InputParams(
+                    stability=PERSONA.stability,
+                    style=PERSONA.style,
+                    speed=PERSONA.speed,
                 ),
-            ]
+            )
+            tts_components = [TtsGate(), tts_service]
             logger.info(f"👥 Second persona '{PERSONA.second_name}' available (ElevenLabs {PERSONA.elevenlabs_model})")
 
         assistant_tap = TranscriptLogger(
@@ -760,6 +760,8 @@ class WebSocketHandler:
 
         async def _on_device_wake():
             AVATAR.send({"type": "wake"})
+            if tts_service is not None:
+                asyncio.create_task(tts_service.ensure_connected())
             # va_client sends {"type":"wake"} on every wake (start_session). Mark
             # the turn boundary for the dangling-VAD guard (A): until the user
             # actually speaks, a server-VAD end-of-turn is a stale pre-wake
