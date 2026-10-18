@@ -1079,7 +1079,9 @@ function activityTag(ch, tag) {
 }
 function sitAnimation(ch, spot) {
   if (spot.animation && ch.actions.has(spot.animation)) return spot.animation;
-  return [...ch.actions.keys()].find(n => /sit/i.test(n) && !/to sit|to stand/i.test(n));
+  // Automatic: a sitting animation, one she reads in if there is one (her book comes with it).
+  const sits = [...ch.actions.keys()].filter(n => /sit/i.test(n) && !/to sit|to stand/i.test(n));
+  return sits.find(n => /read/i.test(n)) || sits[0];
 }
 function walkTo(ch, spot, arrive) {
   ch.move = { target: new THREE.Vector3().fromArray(spot.position || [0, 0, 0]), faceY: spot.rotationY || 0, arrive };
@@ -1177,6 +1179,56 @@ function updateActivity(ch, dt, now) {
       && normTag(activePersona) === normTag(tagPersona) && ch === active) goSit(ch);
 }
 
+// ---------- reading book ----------
+// While she plays a reading animation (one with "read" in its name), the book from
+// "Reading book.glb" lies open in her palms, facing her, its pages turning on the
+// animation's own clock. It's placed from her hands every frame rather than fixed to
+// one hand, so it fits any model and any of the reading poses.
+const BOOK_FILE = /^reading book\.glb$/i;
+const BOOK_WIDTH = 0.26;   // metres across the open book at Size 1
+const BOOK_LIFT = 0.025;   // how far it sits off her palms, toward her face
+let book = null;
+const bookAt = new THREE.Vector3();
+async function loadBook() {
+  const file = files.find(f => BOOK_FILE.test(f));
+  if (!file) return;
+  const g = await glbLoader.loadAsync(`files/${encodeURIComponent(file)}`);
+  g.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
+  const width = new THREE.Box3().setFromObject(g.scene).getSize(new THREE.Vector3()).x;
+  const root = new THREE.Group();
+  root.add(g.scene);
+  root.visible = false;
+  scene.add(root);
+  const mixer = new THREE.AnimationMixer(g.scene);
+  for (const clip of g.animations) mixer.clipAction(clip).play();
+  book = { root, mixer, width: width || 1, duration: Math.max(0, ...g.animations.map(c => c.duration)) };
+}
+function updateBook(ch) {
+  if (!book || ch !== active) return;
+  const reading = ch.current && /read/i.test(ch.current) && !ch.move ? ch.actions.get(ch.current) : null;
+  const h = ch.vrm.humanoid;
+  const at = name => h.getNormalizedBoneNode(name)?.getWorldPosition(new THREE.Vector3());
+  const lh = reading && at('leftHand'), rh = reading && at('rightHand'), head = reading && at('head');
+  book.root.visible = !!(lh && rh && head && ch.root.visible);
+  if (!book.root.visible) return;
+  // Palms: halfway from the wrist to the middle finger's knuckle.
+  const palmL = lh.clone().lerp(at('leftMiddleProximal') || lh, 0.5);
+  const palmR = rh.clone().lerp(at('rightMiddleProximal') || rh, 0.5);
+  const centre = palmL.clone().add(palmR).multiplyScalar(0.5);
+  const across = palmR.sub(palmL);
+  if (across.lengthSq() < 1e-8) return;
+  across.normalize();
+  const toFace = head.sub(centre);
+  toFace.addScaledVector(across, -toFace.dot(across)).normalize();
+  const along = new THREE.Vector3().crossVectors(across, toFace);
+  book.root.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(across, toFace, along));
+  const size = ch.root.scale.y;
+  book.root.scale.setScalar(BOOK_WIDTH * size / book.width);
+  book.root.position.copy(centre).addScaledVector(toFace, BOOK_LIFT * size);
+  bookAt.copy(centre).addScaledVector(toFace, 0.05 * size);
+  if (book.duration) book.mixer.setTime(reading.time % book.duration);
+}
+
 // A gesture can ask for its own framing (full body by default) while it plays.
 function frameGesture(ch, name, want, seconds, start) {
   const clip = ch.actions.get(name)?.getClip();
@@ -1196,7 +1248,8 @@ const _hf = new THREE.Vector3(), _hw = new THREE.Vector3(), _hp = new THREE.Vect
 function updateHeadTurn(ch, dt) {
   const head = ch.vrm.humanoid.getNormalizedBoneNode('head');
   if (!head || !ch.headForward) return;
-  const goal = lastPhase === 'replying' || lastPhase === 'listening' ? 0.85 : lastPhase === 'thinking' ? 0 : 0.3;
+  const goal = lastPhase === 'replying' || lastPhase === 'listening' ? 0.85
+    : lastPhase === 'thinking' || ch.away === 'sit' ? 0 : 0.3;
   ch.headTurn = (ch.headTurn ?? 0) + (goal - (ch.headTurn ?? 0)) * Math.min(1, dt * 3);
   if (ch.headTurn < 0.01) return;
   head.updateWorldMatrix(true, false);
@@ -1480,6 +1533,7 @@ async function boot() {
     try { characters.set(f, await loadCharacter(f, animations)); } catch (e) { console.warn('vrm', f, e); }
   }
   try { await loadLayout(); } catch (e) { console.warn('layout', e); }
+  try { await loadBook(); } catch (e) { console.warn('book', e); }
   if (!vrms.length) setStatus('No .vrm models uploaded yet.');
   else setStatus(`${characters.size} model(s), ${animations.length} animation(s). Waiting for the assistant…`);
   if (params.get('edit') === '1') setEditing(true);
@@ -1585,11 +1639,13 @@ function updateMood(ch, dt, now) {
 }
 
 // The eyes look at the camera (the person in front of the screen), with small
-// glances now and then, and up to the side while thinking.
+// glances now and then, and up to the side while thinking. Seated and quiet she
+// looks at her book instead (or ahead and down without one); spoken to, she looks up.
 const gaze = new THREE.Object3D();
 scene.add(gaze);
 const gazeOffset = new THREE.Vector3(), gazeGlance = new THREE.Vector3(), THINKING_GAZE = new THREE.Vector3(-0.35, 0.3, 0);
-let nextGlance = 0;
+const gazePoint = new THREE.Vector3(), gazeWant = new THREE.Vector3();
+let nextGlance = 0, gazeStarted = false;
 function updateGaze(dt, now) {
   const dist = active ? camera.position.distanceTo(active.root.position) : 2;
   if (now > nextGlance) {
@@ -1597,7 +1653,15 @@ function updateGaze(dt, now) {
     nextGlance = now + 1.5 + Math.random() * 3;
   }
   gazeOffset.lerp(lastPhase === 'thinking' ? THINKING_GAZE : gazeGlance, Math.min(1, dt * 8));
-  gaze.position.copy(gazeOffset).multiplyScalar(dist).applyQuaternion(camera.quaternion).add(camera.position);
+  gazeWant.copy(gazeOffset).multiplyScalar(dist).applyQuaternion(camera.quaternion).add(camera.position);
+  if (active && active.away === 'sit' && lastPhase === 'idle') {
+    if (book?.root.visible) gazeWant.copy(bookAt);
+    else gazeWant.set(0, 0.35, 1.2).multiplyScalar(active.root.scale.y)
+      .applyAxisAngle(new THREE.Vector3(0, 1, 0), active.root.rotation.y).add(active.root.position);
+  }
+  if (!gazeStarted) { gazePoint.copy(gazeWant); gazeStarted = true; }
+  gazePoint.lerp(gazeWant, Math.min(1, dt * 6));
+  gaze.position.copy(gazePoint);
 }
 
 // ---------- live data ----------
@@ -1687,6 +1751,7 @@ renderer.setAnimationLoop(() => {
     }
     updateMood(ch, dt, now);
     ch.vrm.update(dt);
+    updateBook(ch);
   }
   if (debugOn) {
     debugEl.style.display = 'block';
