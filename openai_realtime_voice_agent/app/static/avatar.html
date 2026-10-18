@@ -374,7 +374,8 @@ function phaseAnimation(phase) {
 function playFor(ch, pattern) {
   if (ch.move || ch.away) return;   // walking or sitting: activities pick the animation
   const current = ch.current && ch.actions.get(ch.current);
-  const busy = current && current.loop === THREE.LoopOnce && current.isRunning();
+  const busy = current && current.isRunning()
+    && (current.loop === THREE.LoopOnce || (ch.gestureEnds && ch.current === ch.gesture));
   if (busy) return;
   play(ch, find(ch, pattern) || find(ch, /idle/i));
 }
@@ -510,7 +511,7 @@ function buildActionsUI() {
         return input;
       };
       const start = timing('start', 'start', 'Seconds into the animation to start from (skips a wind-up)');
-      const length = timing('seconds', `${GESTURE_SECONDS}s`, 'Seconds it plays before blending back (0 = the rest of it)');
+      const length = timing('seconds', `${GESTURE_SECONDS}s`, 'Seconds it plays before blending back (0 = the rest of it; longer than the animation repeats it)');
       const total = el('span', { textContent: '' });
       total.style.cssText = 'color: var(--muted); font-size: 12px';
       const showTotal = () => {
@@ -988,7 +989,8 @@ function frameGesture(ch, name, want, seconds, start) {
   if (!clip || want === 'keep') return;
   gestureShot = want || 'full';
   const rest = Math.max(0.5, clip.duration - (Number(start) || 0));
-  gestureShotUntil = performance.now() / 1000 + Math.min(rest, gestureSeconds(seconds) || 15, 15);
+  // As long as it plays: its length (repeating if that's longer than the animation), else the rest of it.
+  gestureShotUntil = performance.now() / 1000 + Math.min(gestureSeconds(seconds) || Math.min(rest, 15), 60);
 }
 
 // While she listens and talks her head turns toward the camera, on top of the
@@ -1345,17 +1347,22 @@ function setMood(ch, action) {
 // plays for at most `seconds` (GESTURE_SECONDS unless the catalogue entry says
 // otherwise; 0 = the rest of the animation), then blends back into talking or
 // idle. Many downloaded gestures hold the pose far longer than a reply needs
-// (the VRoid peace sign is ~12 s).
+// (the VRoid peace sign is ~12 s). A length longer than the animation repeats
+// it until the time is up, which is how a short dance loop becomes a dance.
 const GESTURE_SECONDS = 4;
 function playGesture(ch, name, seconds, start) {
   const action = ch.actions.get(name);
   if (!action) return;
-  action.setLoop(THREE.LoopOnce, 1);
-  action.clampWhenFinished = true;
+  const duration = action.getClip().duration;
+  const from = Math.max(0, Math.min(Number(start) || 0, duration - 0.05));
+  const limit = gestureSeconds(seconds);
+  const repeat = limit > duration - from + 0.05;
+  action.setLoop(repeat ? THREE.LoopRepeat : THREE.LoopOnce, repeat ? Infinity : 1);
+  action.clampWhenFinished = !repeat;
   if (ch.current === name) ch.current = null;   // play it again from the start
   play(ch, name, 0.3);
-  action.time = Math.max(0, Math.min(Number(start) || 0, action.getClip().duration - 0.05));
-  const limit = gestureSeconds(seconds);
+  action.time = from;
+  ch.gesture = name;
   ch.gestureEnds = limit ? performance.now() / 1000 + limit : 0;
 }
 const gestureSeconds = seconds => (seconds === 0 || seconds === '0') ? 0 : Number(seconds) || GESTURE_SECONDS;
@@ -1363,7 +1370,8 @@ function endGestureIfDue(ch, now) {
   if (!ch.gestureEnds || now < ch.gestureEnds) return;
   ch.gestureEnds = 0;
   const current = ch.current && ch.actions.get(ch.current);
-  if (current?.loop === THREE.LoopOnce && current.isRunning() && !ch.move && !ch.away)
+  const gesturing = current?.loop === THREE.LoopOnce || ch.current === ch.gesture;
+  if (gesturing && current.isRunning() && !ch.move && !ch.away)
     play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.6);
 }
 function updateMood(ch, dt, now) {
@@ -1488,7 +1496,8 @@ renderer.setAnimationLoop(() => {
 
 // Handle for poking at the scene from the browser console.
 window.avatar = { scene, camera, roomGroup, get layout() { return layout; }, get active() { return active; },
-  sit: () => active && goSit(active), stand: () => active && goHome(active) };
+  sit: () => active && goSit(active), stand: () => active && goHome(active),
+  gesture: (name, seconds, start) => active && playGesture(active, name, seconds, start) };
 
 boot().catch(e => setStatus(`Failed to start: ${e.message}`));
 </script>
