@@ -454,7 +454,7 @@ function buildActionsUI() {
     const test = el('button', { textContent: '▶', title: 'Try it' });
     test.onclick = () => {
       if (!active) return;
-      if (a.kind === 'gesture') playGesture(active, a.animation, a.seconds);
+      if (a.kind === 'gesture') playGesture(active, a.animation, a.seconds, a.start);
       else { setMood(active, a); active.moodUntil = performance.now() / 1000 + 3; }
     };
     const remove = el('button', { textContent: '✕', className: 'x danger', title: 'Remove' });
@@ -470,13 +470,27 @@ function buildActionsUI() {
       }
       framing.value = a.shot || 'full';
       framing.onchange = () => { a.shot = framing.value; actionsChanged(); };
-      const length = el('input', { type: 'number', className: 'w', min: 0, step: 0.5, value: a.seconds ?? '',
-                                   placeholder: `${GESTURE_SECONDS}s`, title: 'Seconds it plays before blending back (0 = all of it)' });
-      length.onchange = () => {
-        if (length.value === '') delete a.seconds; else a.seconds = Math.max(0, Number(length.value) || 0);
-        actionsChanged();
+      const timing = (key, placeholder, title) => {
+        const input = el('input', { type: 'number', className: 'w', min: 0, step: 0.1, value: a[key] ?? '', placeholder, title });
+        input.onchange = () => {
+          if (input.value === '') delete a[key]; else a[key] = Math.max(0, Number(input.value) || 0);
+          actionsChanged();
+        };
+        return input;
       };
-      box.append(el('div', { className: 'row' }, anim), el('div', { className: 'row' }, framing, length));
+      const start = timing('start', 'start', 'Seconds into the animation to start from (skips a wind-up)');
+      const length = timing('seconds', `${GESTURE_SECONDS}s`, 'Seconds it plays before blending back (0 = the rest of it)');
+      const total = el('span', { textContent: '' });
+      total.style.cssText = 'color: var(--muted); font-size: 12px';
+      const showTotal = () => {
+        const clip = active?.actions.get(a.animation)?.getClip();
+        total.textContent = clip ? `of ${clip.duration.toFixed(1)}s` : '';
+      };
+      showTotal();
+      anim.addEventListener('change', showTotal);
+      box.append(el('div', { className: 'row' }, anim, framing),
+                 el('div', { className: 'row' }, el('span', { textContent: 'Start' }), start,
+                    el('span', { textContent: 'Length' }), length, total));
     } else {
       a.face ??= [];
       a.face.forEach((part, i) => {
@@ -803,11 +817,12 @@ function updateDirector(dt, now) {
   snapCamera = false;
 }
 // A gesture can ask for its own framing (full body by default) while it plays.
-function frameGesture(ch, name, want, seconds) {
+function frameGesture(ch, name, want, seconds, start) {
   const clip = ch.actions.get(name)?.getClip();
   if (!clip || want === 'keep') return;
   gestureShot = want || 'full';
-  gestureShotUntil = performance.now() / 1000 + Math.min(clip.duration, gestureSeconds(seconds) || 15, 15);
+  const rest = Math.max(0.5, clip.duration - (Number(start) || 0));
+  gestureShotUntil = performance.now() / 1000 + Math.min(rest, gestureSeconds(seconds) || 15, 15);
 }
 
 // While she listens and talks her head turns toward the camera, on top of the
@@ -1139,8 +1154,8 @@ function onTag(ch, tag) {
   const action = findAction(tag) || findAction(MOOD_ALIASES[normTag(tag)]);
   if (!action) return;
   if (action.kind === 'gesture') {
-    playGesture(ch, action.animation, action.seconds);
-    frameGesture(ch, action.animation, action.shot, action.seconds);
+    playGesture(ch, action.animation, action.seconds, action.start);
+    frameGesture(ch, action.animation, action.shot, action.seconds, action.start);
   }
   else setMood(ch, action);
 }
@@ -1151,18 +1166,20 @@ function setMood(ch, action) {
   ch.moodTargets = new Map(face);
   ch.moodUntil = Infinity;   // until the reply is over
 }
-// A gesture plays for at most `seconds` (GESTURE_SECONDS unless the catalogue
-// entry says otherwise; 0 = the whole animation), then blends back into
-// talking or idle. Many downloaded gestures hold the pose far longer than a
-// reply needs (the VRoid peace sign is ~12 s).
+// A gesture starts `start` seconds into its animation (to skip a wind-up) and
+// plays for at most `seconds` (GESTURE_SECONDS unless the catalogue entry says
+// otherwise; 0 = the rest of the animation), then blends back into talking or
+// idle. Many downloaded gestures hold the pose far longer than a reply needs
+// (the VRoid peace sign is ~12 s).
 const GESTURE_SECONDS = 4;
-function playGesture(ch, name, seconds) {
+function playGesture(ch, name, seconds, start) {
   const action = ch.actions.get(name);
   if (!action) return;
   action.setLoop(THREE.LoopOnce, 1);
   action.clampWhenFinished = true;
   if (ch.current === name) ch.current = null;   // play it again from the start
   play(ch, name, 0.3);
+  action.time = Math.max(0, Math.min(Number(start) || 0, action.getClip().duration - 0.05));
   const limit = gestureSeconds(seconds);
   ch.gestureEnds = limit ? performance.now() / 1000 + limit : 0;
 }
@@ -1229,8 +1246,8 @@ function onMessage(msg) {
       if (!active) break;
       const wave = normTag(activePersona) === normTag(tagPersona) && findAction('wave');
       if (wave?.kind === 'gesture' && active.actions.has(wave.animation)) {
-        playGesture(active, wave.animation, wave.seconds);
-        frameGesture(active, wave.animation, wave.shot, wave.seconds);
+        playGesture(active, wave.animation, wave.seconds, wave.start);
+        frameGesture(active, wave.animation, wave.shot, wave.seconds, wave.start);
         break;
       }
       const greet = find(active, /bow|wave|greet/i);
