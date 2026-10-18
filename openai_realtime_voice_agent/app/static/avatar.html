@@ -761,12 +761,29 @@ const homeSpot = () => (layout.spots || []).find(s => s.type === 'home') || (lay
 // Each model's size in the room (the editor's Size), 1 = as modelled.
 const characterScale = ch => layout.characterScale?.[ch.file] ?? 1;
 const headHeight = ch => ch.headY * ch.root.scale.y;
+// The spring bones' collider and hit radii are in metres and don't follow the
+// model's scale, so a smaller model kept full-size colliders: the chest one
+// pushed the tie out to float in front of her. Scale them with the model.
+function scaleSpringBones(ch, size) {
+  const springs = ch.vrm.springBoneManager;
+  if (!springs) return;
+  ch.springRadii ??= new Map();
+  for (const collider of springs.colliders) {
+    if (!ch.springRadii.has(collider)) ch.springRadii.set(collider, collider.shape.radius);
+    collider.shape.radius = ch.springRadii.get(collider) * size;
+  }
+  for (const joint of springs.joints) {
+    if (!ch.springRadii.has(joint)) ch.springRadii.set(joint, joint.settings.hitRadius);
+    joint.settings.hitRadius = ch.springRadii.get(joint) * size;
+  }
+}
 function placeCharacter() {
   if (!active) return;
   const spot = homeSpot();
   active.root.position.fromArray(spot?.position || [0, 0, 0]);
   active.root.rotation.y = spot?.rotationY || 0;
   active.root.scale.setScalar(characterScale(active));
+  scaleSpringBones(active, characterScale(active));
   // Let hair and skirt start from rest at the new place instead of whipping across.
   active.root.updateMatrixWorld(true);
   active.vrm.springBoneManager?.reset();
