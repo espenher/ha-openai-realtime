@@ -86,6 +86,11 @@ if bashio::config.has_value 'second_persona_instructions'; then
     SECOND_PERSONA_INSTRUCTIONS=$(bashio::config 'second_persona_instructions')
     export SECOND_PERSONA_INSTRUCTIONS
 fi
+for opt in second_persona_agent second_persona_agent_switch; do
+    if bashio::config.has_value "$opt"; then
+        export "${opt^^}=$(bashio::config "$opt")"
+    fi
+done
 if bashio::config.has_value 'elevenlabs_api_key'; then
     ELEVENLABS_API_KEY=$(bashio::config 'elevenlabs_api_key')
     export ELEVENLABS_API_KEY

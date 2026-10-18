@@ -20,10 +20,11 @@ from pipecat.services.openai.realtime import events as openai_rt_events
 from app.raw_audio_serializer import RawAudioSerializer
 from app.session_manager import SessionManager
 from app.audio_recording_service import AudioRecordingService
-from app.phase_emitter import PhaseEmitter, STALE_AUDIO
+from app.phase_emitter import PhaseEmitter, STALE_AUDIO, TURN_LIVENESS
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
 from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap
 from app.avatar_body import avatar_instructions
+from app.ha_agent import MODE as AGENT_MODE, AgentReplies, HAConversationAgent
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)
@@ -509,6 +510,10 @@ class WebSocketHandler:
         # text frames.
         tts_components = []
         tts_service = None
+        # Optional: a Home Assistant agent answers for the second persona (ha_agent.py).
+        agent_replies = AgentReplies() if PERSONA.second_available and AGENT_MODE.configured else None
+        ha_agent = HAConversationAgent() if agent_replies else None
+        agent_components = [agent_replies] if agent_replies else []
         tag_components = []
         if PERSONA.second_available:
             tag_components = [AvatarTags()]
@@ -539,6 +544,7 @@ class WebSocketHandler:
                 context_aggregator.user(),
                 TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
                 openai_service,
+                *agent_components,
                 *tag_components,
                 assistant_tap,
                 *tts_components,
@@ -548,6 +554,7 @@ class WebSocketHandler:
             pipeline_components.extend([
                 TranscriptLogger(capture="user", on_user_transcript=self._dispatch_user_transcript),
                 openai_service,
+                *agent_components,
                 *tag_components,
                 assistant_tap,
                 *tts_components,
@@ -660,11 +667,15 @@ class WebSocketHandler:
         # Set while an announcement (see _announce) is being spoken, so the
         # interrupt / late-audio kill machinery doesn't cancel it.
         _announcing = {"v": False}
+        # The HA agent's answer in progress (ha_agent.py), so a stop or a newer turn can drop it.
+        _agent_task = {"t": None}
         # When the device last woke (for dropping wake-word scraps, see _on_user_transcript).
         _last_wake = {"t": 0.0}
 
         async def _on_device_interrupt():
             AVATAR.send({"type": "interrupt"})
+            if _agent_task["t"] is not None:
+                _agent_task["t"].cancel()
             # The device closed its mic; speech reported before the next wake is late audio.
             phase_emitter.note_device_mic_closed()
             _interrupt_kill_until["t"] = time.monotonic() + INTERRUPT_KILL_WINDOW_S
@@ -760,6 +771,8 @@ class WebSocketHandler:
 
         async def _on_device_wake():
             AVATAR.send({"type": "wake"})
+            if agent_replies is not None:
+                asyncio.create_task(_sync_agent_mode())
             if tts_service is not None:
                 asyncio.create_task(tts_service.ensure_connected())
             # va_client sends {"type":"wake"} on every wake (start_session). Mark
@@ -806,6 +819,8 @@ class WebSocketHandler:
             else:
                 return "busy"
             _announcing["v"] = True
+            if agent_replies is not None:
+                agent_replies.let_realtime_reply()
             # Nobody woke the device, so speech the VAD reports now isn't a request.
             phase_emitter.note_device_mic_closed()
             # The device drops incoming audio after a stop until it sees
@@ -842,6 +857,57 @@ class WebSocketHandler:
                 return PERSONA.second_instructions + avatar_instructions(), ["text"]
             return main_instructions, ["audio"]
 
+        # While a Home Assistant agent answers for the second persona the realtime
+        # session only listens: OpenAI still decides when the user has finished
+        # and transcribes it, but creates no replies of its own.
+        default_create_response = getattr(
+            openai_service._session_properties.audio.input.turn_detection, "create_response", None)
+
+        def _turn_detection_change(target: str):
+            """Set create_response for `target` in the session properties; the new turn detection if it changed."""
+            audio_input = openai_service._session_properties.audio.input
+            current = audio_input.turn_detection
+            if current is None or not hasattr(current, "create_response") or default_create_response is None:
+                return None
+            want = False if (target == SECOND and AGENT_MODE.enabled) else default_create_response
+            if current.create_response == want:
+                return None
+            audio_input.turn_detection = current.model_copy(update={"create_response": want})
+            return audio_input.turn_detection
+
+        async def _send_turn_detection(turn_detection) -> None:
+            # The whole audio input (transcription, noise reduction too), so the
+            # update can't drop the transcription the agent depends on.
+            await openai_service.send_client_event(openai_rt_events.SessionUpdateEvent(
+                session=openai_rt_events.SessionProperties(audio=openai_rt_events.AudioConfiguration(
+                    input=openai_service._session_properties.audio.input))
+            ))
+            logger.info(f"🧠 realtime replies {'on' if turn_detection.create_response else 'off (the HA agent answers)'}")
+
+        async def _sync_agent_mode() -> None:
+            """At each wake: re-read the agent switch and update the session if that changes anything."""
+            try:
+                await AGENT_MODE.refresh()
+                change = _turn_detection_change(PERSONA_STATE.active)
+                if change is not None:
+                    await _send_turn_detection(change)
+            except Exception as e:
+                logger.warning(f"🧠 couldn't update the agent mode: {e!r}")
+
+        async def _answer_with_agent(text: str) -> None:
+            TURN_LIVENESS.tool_started()   # keeps the thinking watchdog from giving up while the agent works
+            try:
+                reply = await ha_agent.ask(text, avatar_instructions())
+            except asyncio.CancelledError:
+                logger.info("🧠 agent answer dropped (stopped or superseded)")
+                raise
+            except Exception as e:
+                logger.warning(f"🧠 agent failed: {e!r}")
+                reply = "Sorry, I couldn't get an answer just now."
+            finally:
+                TURN_LIVENESS.tool_finished()
+            await agent_replies.speak(reply)
+
         async def _quick_switch_persona(target: str) -> bool:
             """Swap persona at a wake word, without a new session or a greeting.
 
@@ -859,6 +925,11 @@ class WebSocketHandler:
             await openai_service.send_client_event(openai_rt_events.SessionUpdateEvent(
                 session=openai_rt_events.SessionProperties(instructions=instructions, output_modalities=modalities)
             ))
+            if agent_replies is not None:
+                await AGENT_MODE.refresh()
+                change = _turn_detection_change(target)
+                if change is not None:
+                    await _send_turn_detection(change)
             logger.info(f"👥 wake word → {name}")
             AVATAR.send({"type": "persona", "value": name})
             return True
@@ -895,6 +966,9 @@ class WebSocketHandler:
                     await asyncio.sleep(1)
                 props = openai_service._session_properties
                 props.instructions, props.output_modalities = _persona_settings(target)
+                if agent_replies is not None:
+                    await AGENT_MODE.refresh()
+                    _turn_detection_change(target)   # sent with the fresh session below
                 PERSONA_STATE.active = target
                 name = PERSONA.second_name if target == SECOND else PERSONA.main_name
                 logger.info(f"👥 switching persona -> {name}")
@@ -936,7 +1010,15 @@ class WebSocketHandler:
             # wake word itself, transcribed as "s.". Its reply talks over the
             # real request, which then only gets answered afterwards as the next
             # turn (2026-10-17 13:36). Drop the scrap's reply.
-            if sum(c.isalpha() for c in text) <= 1 and time.monotonic() - _last_wake["t"] < 4.0:
+            scrap = sum(c.isalpha() for c in text) <= 1 and time.monotonic() - _last_wake["t"] < 4.0
+            if AGENT_MODE.active:
+                if scrap or STALE_AUDIO.active or not text.strip():
+                    return
+                if _agent_task["t"] is not None:
+                    _agent_task["t"].cancel()
+                _agent_task["t"] = asyncio.create_task(_answer_with_agent(text))
+                return
+            if scrap:
                 try:
                     await openai_service.send_client_event(openai_rt_events.ResponseCancelEvent())
                     logger.info(f"🧹 scrap right after the wake word ({text!r}) → response.cancel")

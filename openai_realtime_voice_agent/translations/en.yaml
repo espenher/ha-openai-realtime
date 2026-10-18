@@ -238,6 +238,20 @@ configuration:
     description: >-
       The second assistant's own system prompt. It uses the same tools as
       the main one. Leave empty to disable the second persona.
+  second_persona_agent:
+    name: "👥 Persona · Second persona answered by a Home Assistant agent"
+    description: >-
+      Optional. A conversation agent's entity id (e.g. a Claude agent,
+      conversation.claude) that writes the second persona's replies instead
+      of the realtime model, with its own prompt, settings and device
+      control as in Assist. The realtime model then only listens and
+      transcribes. Empty = the second persona uses the realtime model.
+  second_persona_agent_switch:
+    name: "👥 Persona · Switch for the Home Assistant agent"
+    description: >-
+      Optional input_boolean (e.g. input_boolean.nabu_uses_agent). When
+      set, the agent above is used only while it is on, checked each time
+      the device wakes. Empty = always use the agent when one is set.
   elevenlabs_api_key:
     name: "👥 Persona · ElevenLabs API key"
     description: >-

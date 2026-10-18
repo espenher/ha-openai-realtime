@@ -53,10 +53,15 @@ class PersonaConfig:
     stability: float | None = None
     style: float | None = None
     speed: float | None = None
+    # Optional Home Assistant conversation agent that answers for the second
+    # persona (see ha_agent.py), and an optional input_boolean that turns it on/off.
+    second_agent: str = ""
+    second_agent_switch: str = ""
 
     @property
     def second_available(self) -> bool:
-        return bool(self.second_instructions and self.elevenlabs_api_key and self.elevenlabs_voice_id)
+        return bool((self.second_instructions or self.second_agent)
+                    and self.elevenlabs_api_key and self.elevenlabs_voice_id)
 
     @classmethod
     def from_env(cls) -> "PersonaConfig":
@@ -72,6 +77,8 @@ class PersonaConfig:
             stability=_float_env("ELEVENLABS_STABILITY"),
             style=_float_env("ELEVENLABS_STYLE"),
             speed=_float_env("ELEVENLABS_SPEED"),
+            second_agent=_env("SECOND_PERSONA_AGENT"),
+            second_agent_switch=_env("SECOND_PERSONA_AGENT_SWITCH"),
         )
 
     def persona_for_option(self, option: str | None) -> str:
