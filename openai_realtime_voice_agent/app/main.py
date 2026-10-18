@@ -108,13 +108,34 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         server-VAD drives every user-turn response, so we never need to create one
         ourselves on reconnect. The live context is untouched (it's restored by the
         SessionManager on the next real turn).
+
+        One reset at a time: two overlapping ones (a persona switch's, and the
+        recovery's for the "connection closed" that switch caused) left two
+        sockets open, and the session.update meant for the one in use was
+        dropped while the other was disconnecting. That session kept OpenAI's
+        defaults (spoken audio, no instructions), so the second persona's reply
+        came out in the realtime voice and her ElevenLabs voice at once.
         """
-        await super().reset_conversation()
+        if not hasattr(self, "_reset_lock"):
+            self._reset_lock = asyncio.Lock()
+        async with self._reset_lock:
+            await super().reset_conversation()
+            try:
+                self._run_llm_when_api_session_ready = False
+                self._llm_needs_conversation_setup = False
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(f"⚠️ could not clear post-reconnect response flags: {e!r}")
+
+    async def _handle_evt_session_updated(self, evt):  # type: ignore[override]
+        # What the session actually runs with: a persona's reply in the wrong voice
+        # shows up here as the wrong output modalities.
         try:
-            self._run_llm_when_api_session_ready = False
-            self._llm_needs_conversation_setup = False
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning(f"⚠️ could not clear post-reconnect response flags: {e!r}")
+            session = evt.session
+            voice = getattr(getattr(getattr(session, "audio", None), "output", None), "voice", None)
+            logger.info(f"🎛️ realtime session ready: output={getattr(session, 'output_modalities', None)} voice={voice}")
+        except Exception:
+            pass
+        await super()._handle_evt_session_updated(evt)
 
     # Error codes that must NOT kill the realtime session. pipecat 0.0.97's
     # _receive_task_handler does `_handle_evt_error(evt); return` on EVERY
@@ -214,12 +235,19 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
         Wrap the loop and report its end; ConnectionRecovery treats the
         message as a reconnect trigger.
         """
+        websocket = self._websocket
         try:
             await super()._receive_task_handler()
         except asyncio.CancelledError:
             raise  # our own disconnect/reset tearing the task down — not a death
         except Exception as e:
+            if self._disconnecting or self._websocket is not websocket:
+                return  # our own disconnect closed it
             await self.push_error(error_msg=f"realtime receive loop died: {e!r}")
+            return
+        # Our own disconnect (a persona switch's reset) closes the socket before it
+        # cancels this task, so the loop can end here first: not a death either.
+        if self._disconnecting or self._websocket is not websocket:
             return
         # Loop ended without an exception: a clean server-side close, or the
         # fatal-error path (which already pushed its own ErrorFrame —
