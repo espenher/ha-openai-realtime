@@ -322,6 +322,17 @@ class ConnectionRecovery(FrameProcessor):
         device out of its stuck `thinking` blink so the user can retry.
         """
         try:
+            # Only a turn stuck in `thinking` needs unsticking. An error while the
+            # device is still listening doesn't end the turn: e.g. the wake's
+            # interruption makes the ElevenLabs voice close its context on a
+            # connection that died overnight, which errors (and the voice
+            # reconnects on its next reply). Going idle then cut the user off
+            # mid-request (2026-10-18 12:29).
+            await asyncio.sleep(0.3)   # the error can land a moment before the phase flips
+            phase = getattr(self._phase_emitter, "_current", None)
+            if self._phase_emitter is not None and phase != "thinking":
+                logger.info(f"⚠️ error while {phase or 'idle'}, turn left running ({reason[:90]})")
+                return
             logger.warning(f"⚠️ turn ended on error, emitting idle to unstick device ({reason[:90]})")
             await self._go_idle(f"turn ended on error: {reason[:60]}")
         except Exception as e:
