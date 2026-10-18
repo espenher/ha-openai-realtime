@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 GARMENT = re.compile(r"^Outfit_([A-Za-z]+?)\d*$")
 VARIANT = re.compile(r"^(.+?)__(.+?)__(\d+)-(.+)_([0-9a-f]{6})\.(png|jpe?g)$", re.I)
 # Clothes she can take off and put back on herself; the rest of the outfit stays on.
-CHANGEABLE = {"jacket": "Jacket", "tie": "Tie", "socks": "Sock", "sneakers": "Sneaker", "shirt": "Shirt", "skirt": "Skirt", "stripes": "UnderwearBottom", "tankie": "UnderwearTop"}
+CHANGEABLE = {"jacket": "Jacket", "tie": "Tie", "socks": "Sock", "sneakers": "Sneaker", "shirt": "Shirt", "skirt": "Skirt", "panties": "UnderwearBottom", "top": "UnderwearTop"}
 GARMENT_WORDS = {"Jacket": "jacket", "Shirt": "shirt", "Skirt": "skirt", "Sneaker": "sneakers", "Sock": "socks",
                  "Tie": "tie", "UnderwearBottom": "stripes", "UnderwearTop": "tankie"}
 # Colour variant textures she can switch, by what they colour.
@@ -144,7 +144,7 @@ def describe_state(layout: dict, model: Path) -> str:
 # Clothes and colours she can also change with tags, which works where she has
 # no tools (when a Home Assistant agent answers for her): [take off jacket],
 # [put on jacket], [hair pink], [jacket burgundy], [eyes amber].
-TAG_CLOTHES = ("jacket", "tie", "socks", "sneakers")
+TAG_CLOTHES = ("jacket", "tie", "socks", "sneakers", "panties", "top")
 OUTFIT_TAG = re.compile(r"^(take off|remove|put on|wear)\s+(?:your\s+|my\s+)?(.+)$")
 
 
