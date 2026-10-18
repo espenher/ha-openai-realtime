@@ -221,6 +221,7 @@ function retarget(asset, vrm) {
   const vrmRootY = vrm.scene.getWorldPosition(v).y;
   const hipsScale = Math.abs(vrmHipsY - vrmRootY) / motionHipsHeight;
   const vrm0 = vrm.meta?.metaVersion === '0';
+  let travelSpeed = 0;   // how fast the motion itself moves forward (a walk), in metres per second at Size 1
   for (const track of clip.tracks) {
     const [rigName, property] = track.name.split('.');
     const node = vrm.humanoid.getNormalizedBoneNode(mixamoRig[mixamoBone(rigName)]);
@@ -238,6 +239,8 @@ function retarget(asset, vrm) {
       // and forward stay at the model's own rest position, so no animation
       // shifts or walks it out of view.
       const rest = node.position.clone();
+      const v = track.values, last = v.length - 3;
+      if (clip.duration > 0) travelSpeed = Math.hypot(v[last] - v[0], v[last + 2] - v[2]) * hipsScale / clip.duration;
       tracks.push(new THREE.VectorKeyframeTrack(`${node.name}.${property}`, track.times,
         track.values.map((x, i) => {
           const axis = i % 3;
@@ -245,7 +248,9 @@ function retarget(asset, vrm) {
         })));
     }
   }
-  return new THREE.AnimationClip(clip.name, clip.duration, tracks);
+  const result = new THREE.AnimationClip(clip.name, clip.duration, tracks);
+  result.travelSpeed = travelSpeed;
+  return result;
 }
 
 // VRM Animation (.vrma) is made for VRM skeletons, so three-vrm-animation maps
@@ -322,7 +327,9 @@ async function loadCharacter(file, animations) {
   }
   for (const [name, makeClip] of animations) {
     try {
-      const action = ch.mixer.clipAction(makeClip(vrm));
+      const clip = makeClip(vrm);
+      const action = ch.mixer.clipAction(clip);
+      if (clip.travelSpeed) (ch.travelSpeeds ??= new Map()).set(name, clip.travelSpeed);
       if (ONE_SHOT.test(name)) { action.setLoop(THREE.LoopOnce, 1); action.clampWhenFinished = true; }
       ch.actions.set(name, action);
     } catch (e) { console.warn('animation', name, e); }
@@ -886,7 +893,7 @@ function updateDirector(dt, now) {
 // goes after a quiet spell or when she says [sit down]; [stand up] brings her
 // back. Seated she still talks, but without talking animations or gestures.
 const IDLE_TO_SIT_S = 90;     // quiet seconds before she goes and sits
-const WALK_SPEED = 0.7;       // metres per second at Size 1
+const WALK_SPEED = 0.7;       // metres per second at Size 1 (without a walk animation to measure)
 const TURN_SPEED = 3.5;       // radians per second
 const SIT_WORDS = new Set(['sit down', 'sit', 'go sit', 'take a seat', 'sit in your chair']);
 const STAND_WORDS = new Set(['stand up', 'get up', 'stand']);
@@ -905,6 +912,8 @@ function sitAnimation(ch, spot) {
 function walkTo(ch, spot, arrive) {
   ch.move = { target: new THREE.Vector3().fromArray(spot.position || [0, 0, 0]), faceY: spot.rotationY || 0, arrive };
   const walk = find(ch, /walk/i);
+  // Move as fast as the walk itself steps (measured from the file), so the feet don't slide.
+  ch.move.speed = (walk && ch.travelSpeeds?.get(walk)) || WALK_SPEED;
   play(ch, walk || find(ch, /idle/i), 0.4);
 }
 function goSit(ch) {
@@ -947,7 +956,7 @@ function updateActivity(ch, dt, now) {
       const heading = Math.atan2(dx, dz), turn = angleTo(root.rotation.y, heading);
       root.rotation.y += Math.sign(turn) * Math.min(Math.abs(turn), TURN_SPEED * dt);
       if (Math.abs(turn) < 0.6) {
-        const step = Math.min(dist, WALK_SPEED * root.scale.y * dt);
+        const step = Math.min(dist, m.speed * root.scale.y * dt);
         root.position.x += dx / dist * step;
         root.position.z += dz / dist * step;
       }
