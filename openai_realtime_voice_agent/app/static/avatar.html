@@ -118,7 +118,14 @@
       accept=".glb,.vrm,.fbx,.vrma,.png,.jpg,.jpeg"></label></div>
 
   <h2>Save</h2>
-  <div class="row"><button id="saveView">Use this camera view</button></div>
+  <p>The camera picks a shot by itself: wide while she's idle, full body when she's woken or gestures, close-up while
+     she talks. Line up a view and set it as a shot; full body and close-up follow her from that angle.</p>
+  <div class="row"><button id="setWide">Set wide</button><button id="setFull">Set full body</button>
+    <button id="setClose">Set close-up</button></div>
+  <div class="row">Preview <button class="shotPreview" data-shot="wide">Wide</button>
+    <button class="shotPreview" data-shot="full">Full body</button>
+    <button class="shotPreview" data-shot="close">Close-up</button></div>
+  <div class="row"><button id="autoShots">Automatic full body &amp; close-up</button></div>
   <div class="row"><button id="save" class="primary">Save room</button><button id="exitEdit">Done</button></div>
   <p id="saveStatus"></p>
 </div>
@@ -303,6 +310,9 @@ async function loadCharacter(file, animations) {
   const head = vrm.humanoid.getNormalizedBoneNode('head');
   const ch = { file, vrm, root, mixer: new THREE.AnimationMixer(vrm.scene), actions: new Map(), current: null,
                headY: head ? head.getWorldPosition(new THREE.Vector3()).y : 1.5, style: null };
+  // The holder faces +z, so in the rest pose that's where the face points; keep
+  // it in the head's own frame to know where the head is looking later.
+  if (head) ch.headForward = new THREE.Vector3(0, 0, 1).applyQuaternion(head.getWorldQuaternion(new THREE.Quaternion()).invert());
   if (vrm.lookAt) {
     vrm.lookAt.target = gaze;
     const proxy = new VRMLookAtQuaternionProxy(vrm.lookAt);
@@ -360,13 +370,15 @@ function showPersona(persona) {
   if (!ch) return;
   const key = (persona || '').toLowerCase();
   ch.style = params.get(`${key}_style`) || STYLE_DEFAULTS[key] || null;
-  if (ch !== active) {
+  const changed = ch !== active;
+  if (changed) {
     if (active) active.root.visible = false;
     active = ch;
     active.root.visible = true;
   }
   placeCharacter();
-  if (!editing) applyViewCamera(); else { buildWardrobeUI(); buildAppearanceUI(); buildAnimationUI(); buildActionsUI(); }
+  if (!editing) { if (changed) applyViewCamera(); }
+  else { buildWardrobeUI(); buildAppearanceUI(); buildAnimationUI(); buildActionsUI(); }
   playFor(active, phaseAnimation(lastPhase));
 }
 
@@ -452,7 +464,13 @@ function buildActionsUI() {
       const anim = el('select');
       fillSelect(anim, [...new Set([a.animation, ...animations].filter(Boolean))], a.animation);
       anim.onchange = () => { a.animation = anim.value; actionsChanged(); };
-      box.append(el('div', { className: 'row' }, anim));
+      const framing = el('select', { title: 'Camera while it plays' });
+      for (const [value, text] of [['full', 'Full body'], ['close', 'Close-up'], ['keep', 'Camera stays']]) {
+        framing.append(el('option', { value, textContent: text }));
+      }
+      framing.value = a.shot || 'full';
+      framing.onchange = () => { a.shot = framing.value; actionsChanged(); };
+      box.append(el('div', { className: 'row' }, anim, framing));
     } else {
       a.face ??= [];
       a.face.forEach((part, i) => {
@@ -707,15 +725,106 @@ function placeCharacter() {
   active.vrm.springBoneManager?.reset();
 }
 
+// Cut straight to the current shot (on load, a new character, leaving the editor).
 function applyViewCamera() {
-  if (layout.camera) {
-    camera.position.fromArray(layout.camera.position);
-    camera.lookAt(new THREE.Vector3().fromArray(layout.camera.target));
-  } else if (active) {
-    const p = active.root.position, h = active.headY;
-    camera.position.set(p.x, p.y + h * 0.82, p.z + h * 1.55);
-    camera.lookAt(p.x, p.y + h * 0.72, p.z);
+  snapCamera = true;
+}
+
+// ---------- camera director ----------
+// Outside the editor the camera picks a shot from what's going on and eases
+// between them: wide (the saved room view) while idle, full body when she's
+// woken or does a gesture, close-up while she talks. Full body and close-up
+// follow her: from an angle saved in the editor (stored relative to her, so it
+// works wherever she stands) or one worked out between her front and the wide view.
+const SHOT_BACK_TO_WIDE_S = 12;   // after a conversation, before easing back out
+const SHOT_MIN_S = 1.5;           // shortest time on a shot, so quick phase flips don't jerk it around
+const camGoalPos = new THREE.Vector3(), camGoalTarget = new THREE.Vector3(), camTarget = new THREE.Vector3();
+let shot = 'wide', shotSince = -Infinity, snapCamera = true, idleSince = -Infinity;
+let gestureShot = null, gestureShotUntil = 0;
+function wantedShot(now) {
+  if (gestureShot && now < gestureShotUntil) return gestureShot;
+  if (lastPhase === 'replying') return 'close';
+  if (lastPhase === 'listening' || lastPhase === 'thinking') return 'full';
+  return shot !== 'wide' && now - idleSince < SHOT_BACK_TO_WIDE_S ? 'full' : 'wide';
+}
+function shotPose(name, outPos, outTarget) {
+  const wide = layout.camera;
+  if (name === 'wide' || !active) {
+    if (wide) { outPos.fromArray(wide.position); outTarget.fromArray(wide.target); return; }
+    const p = active ? active.root.position : new THREE.Vector3(), h = active?.headY || 1.5;
+    outPos.set(p.x, p.y + h * 0.82, p.z + h * 1.55);
+    outTarget.set(p.x, p.y + h * 0.72, p.z);
+    return;
   }
+  const saved = layout.cameraShots?.[name];
+  if (saved) {
+    active.root.localToWorld(outPos.fromArray(saved.position));
+    active.root.localToWorld(outTarget.fromArray(saved.target));
+    return;
+  }
+  const root = active.root.position, h = active.headY;
+  const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(active.root.quaternion);
+  if (wide) {
+    const toWide = new THREE.Vector3().fromArray(wide.position).sub(root).setY(0).normalize();
+    dir.lerp(toWide, 0.5).normalize();
+  }
+  let span;
+  if (name === 'close') {
+    const head = active.vrm.humanoid.getNormalizedBoneNode('head');
+    head ? head.getWorldPosition(outTarget) : outTarget.set(root.x, root.y + h, root.z);
+    outTarget.y += 0.02;
+    span = 0.62;
+  } else {
+    outTarget.set(root.x, root.y + h * 0.52, root.z);
+    span = h * 1.3;
+  }
+  const dist = (span / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  outPos.copy(outTarget).addScaledVector(dir, dist);
+  outPos.y += span * 0.06;
+}
+function updateDirector(dt, now) {
+  const want = wantedShot(now);
+  if (want !== shot && (snapCamera || now - shotSince >= SHOT_MIN_S)) { shot = want; shotSince = now; }
+  shotPose(shot, camGoalPos, camGoalTarget);
+  if (shot === 'wide') {   // a slow drift so the room doesn't look frozen
+    camGoalPos.x += Math.sin(now * 0.07) * 0.08;
+    camGoalPos.y += Math.sin(now * 0.05 + 1) * 0.03;
+  }
+  const k = snapCamera ? 1 : 1 - Math.exp(-dt * 2.2);
+  camera.position.lerp(camGoalPos, k);
+  camTarget.lerp(camGoalTarget, k);
+  camera.lookAt(camTarget);
+  snapCamera = false;
+}
+// A gesture can ask for its own framing (full body by default) while it plays.
+function frameGesture(ch, name, want) {
+  const clip = ch.actions.get(name)?.getClip();
+  if (!clip || want === 'keep') return;
+  gestureShot = want || 'full';
+  gestureShotUntil = performance.now() / 1000 + Math.min(clip.duration, 15);
+}
+
+// While she listens and talks her head turns toward the camera, on top of the
+// animation, so she looks at whoever is in front of the screen rather than off
+// to the side where some talking animations point her.
+const HEAD_TURN_MAX = THREE.MathUtils.degToRad(35);
+const _hq = new THREE.Quaternion(), _pq = new THREE.Quaternion(), _dq = new THREE.Quaternion(), _nq = new THREE.Quaternion();
+const _hf = new THREE.Vector3(), _hw = new THREE.Vector3(), _hp = new THREE.Vector3();
+function updateHeadTurn(ch, dt) {
+  const head = ch.vrm.humanoid.getNormalizedBoneNode('head');
+  if (!head || !ch.headForward) return;
+  const goal = lastPhase === 'replying' || lastPhase === 'listening' ? 0.85 : lastPhase === 'thinking' ? 0 : 0.3;
+  ch.headTurn = (ch.headTurn ?? 0) + (goal - (ch.headTurn ?? 0)) * Math.min(1, dt * 3);
+  if (ch.headTurn < 0.01) return;
+  head.updateWorldMatrix(true, false);
+  head.getWorldQuaternion(_hq);
+  _hf.copy(ch.headForward).applyQuaternion(_hq);
+  _hw.copy(camera.position).sub(head.getWorldPosition(_hp)).normalize();
+  _dq.setFromUnitVectors(_hf, _hw);
+  const angle = 2 * Math.acos(Math.min(1, Math.abs(_dq.w)));
+  _nq.identity().slerp(_dq, Math.min(1, HEAD_TURN_MAX / Math.max(angle, 1e-6)) * ch.headTurn);
+  head.parent.getWorldQuaternion(_pq).invert();
+  head.quaternion.copy(_pq).multiply(_nq.multiply(_hq));
 }
 
 async function loadLayout() {
@@ -726,7 +835,6 @@ async function loadLayout() {
   loadSpots();
   for (const ch of characters.values()) { applyWardrobe(ch); applyAppearance(ch); }
   placeCharacter();
-  if (!editing) applyViewCamera();
 }
 // While the editor is open a full reload would throw away unsaved edits, but
 // Nabu changing her own clothes or colours should still show (and be kept when
@@ -904,9 +1012,32 @@ $('spotAnim').onchange = e => {
   s.animation = e.target.value === '(automatic)' ? undefined : e.target.value;
 };
 
-$('saveView').onclick = () => {
+$('setWide').onclick = () => {
   layout.camera = { position: toArr(camera.position), target: toArr(orbit.target) };
-  $('saveStatus').textContent = 'Camera view set — remember to save.';
+  $('saveStatus').textContent = 'Wide shot set — remember to save.';
+};
+for (const [id, name, label] of [['setFull', 'full', 'Full body'], ['setClose', 'close', 'Close-up']]) {
+  $(id).onclick = () => {
+    if (!active) return;
+    (layout.cameraShots ??= {})[name] = {
+      position: toArr(active.root.worldToLocal(camera.position.clone())),
+      target: toArr(active.root.worldToLocal(orbit.target.clone())),
+    };
+    $('saveStatus').textContent = `${label} shot set — remember to save.`;
+  };
+}
+for (const b of document.querySelectorAll('.shotPreview')) {
+  b.onclick = () => {
+    const pos = new THREE.Vector3(), target = new THREE.Vector3();
+    shotPose(b.dataset.shot, pos, target);
+    camera.position.copy(pos);
+    orbit.target.copy(target);
+    orbit.update();
+  };
+}
+$('autoShots').onclick = () => {
+  delete layout.cameraShots;
+  $('saveStatus').textContent = 'Full body and close-up are automatic again — remember to save.';
 };
 $('save').onclick = async () => {
   const r = await fetch('layout', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(layout) });
@@ -1001,7 +1132,7 @@ async function loadCatalogue() {
 function onTag(ch, tag) {
   const action = findAction(tag) || findAction(MOOD_ALIASES[normTag(tag)]);
   if (!action) return;
-  if (action.kind === 'gesture') playGesture(ch, action.animation);
+  if (action.kind === 'gesture') { playGesture(ch, action.animation); frameGesture(ch, action.animation, action.shot); }
   else setMood(ch, action);
 }
 function setMood(ch, action) {
@@ -1065,6 +1196,7 @@ function onMessage(msg) {
       break;
     case 'persona': showPersona(msg.value); break;
     case 'phase':
+      if (msg.value === 'idle' && lastPhase !== 'idle') idleSince = now;
       lastPhase = msg.value;
       if (active) playFor(active, phaseAnimation(msg.value));
       if (active && msg.value !== 'replying' && active.moodUntil === Infinity) active.moodUntil = now + MOOD_HOLD;
@@ -1073,7 +1205,11 @@ function onMessage(msg) {
     case 'wake': {
       if (!active) break;
       const wave = normTag(activePersona) === normTag(tagPersona) && findAction('wave');
-      if (wave?.kind === 'gesture' && active.actions.has(wave.animation)) { playGesture(active, wave.animation); break; }
+      if (wave?.kind === 'gesture' && active.actions.has(wave.animation)) {
+        playGesture(active, wave.animation);
+        frameGesture(active, wave.animation, wave.shot);
+        break;
+      }
       const greet = find(active, /bow|wave|greet/i);
       if (greet) play(active, greet, 0.3);
       break;
@@ -1106,11 +1242,12 @@ renderer.setAnimationLoop(() => {
   mouth += (target - mouth) * (target > mouth ? 0.55 : 0.25);
 
   roomMixer?.update(dt);
-  if (editing) orbit.update();
+  if (editing) orbit.update(); else updateDirector(dt, now);
   updateGaze(dt, now);
   for (const ch of characters.values()) {
     if (!ch.root.visible) continue;
     ch.mixer.update(dt);
+    updateHeadTurn(ch, dt);
     const em = ch.vrm.expressionManager;
     em?.setValue('aa', mouth);
     nextBlink -= dt;
