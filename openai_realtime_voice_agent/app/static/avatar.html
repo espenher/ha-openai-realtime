@@ -91,6 +91,7 @@
   <p>Nabu's idea of herself. Her clothes and colours right now are added automatically.</p>
   <textarea id="charLooks" placeholder="How she looks: hair, eyes, outfit…"></textarea>
   <textarea id="charRoom" placeholder="Her room: what's in it, what it feels like…"></textarea>
+  <div class="row">Size <input id="charSize" type="number" step="0.02" min="0.3" max="2" value="1"></div>
   <h2>Moods &amp; gestures</h2>
   <p>Tags Nabu can put in her replies. Moods set her face, gestures play an animation once. The note tells her when
      to use it. Saved with the room; she knows about changes right away.</p>
@@ -327,6 +328,15 @@ async function loadCharacter(file, animations) {
     } catch (e) { console.warn('animation', name, e); }
   }
   findGarments(ch);
+  // A skirt that collides with the arms and hands but has nothing to stop it at
+  // the hips gets shoved through the body by a hand on the hip; let skirts
+  // ignore the arms (the legs still push them, hair is unchanged).
+  const arms = ['leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand']
+    .map(bone => vrm.humanoid.getRawBoneNode(bone)).filter(Boolean);
+  const onArm = obj => { for (let o = obj; o; o = o.parent) if (arms.includes(o)) return true; return false; };
+  for (const joint of vrm.springBoneManager?.joints ?? []) {
+    if (/skirt/i.test(joint.bone.name)) joint.colliderGroups = joint.colliderGroups.filter(g => !g.colliders.some(onArm));
+  }
   ch.mixer.addEventListener('finished', e => {
     if (e.action === ch.actions.get(ch.current)) playFor(ch, phaseAnimation(lastPhase));
   });
@@ -522,6 +532,12 @@ function buildActionsUI() {
 }
 $('charLooks').onchange = () => { (layout.character ??= {}).appearance = $('charLooks').value.trim(); };
 $('charRoom').onchange = () => { (layout.character ??= {}).room = $('charRoom').value.trim(); };
+$('charSize').onchange = () => {
+  if (!active) return;
+  const size = Math.max(0.3, Math.min(2, Number($('charSize').value) || 1));
+  (layout.characterScale ??= {})[active.file] = size;
+  placeCharacter();
+};
 $('addMood').onclick = () => {
   editableActions().push({ tag: 'new mood', kind: 'mood', face: [], note: '' });
   actionsChanged(); buildActionsUI();
@@ -742,11 +758,15 @@ function loadSpots() {
 }
 const homeSpot = () => (layout.spots || []).find(s => s.type === 'home') || (layout.spots || [])[0];
 
+// Each model's size in the room (the editor's Size), 1 = as modelled.
+const characterScale = ch => layout.characterScale?.[ch.file] ?? 1;
+const headHeight = ch => ch.headY * ch.root.scale.y;
 function placeCharacter() {
   if (!active) return;
   const spot = homeSpot();
   active.root.position.fromArray(spot?.position || [0, 0, 0]);
   active.root.rotation.y = spot?.rotationY || 0;
+  active.root.scale.setScalar(characterScale(active));
   // Let hair and skirt start from rest at the new place instead of whipping across.
   active.root.updateMatrixWorld(true);
   active.vrm.springBoneManager?.reset();
@@ -778,7 +798,7 @@ function shotPose(name, outPos, outTarget) {
   const wide = layout.camera;
   if (name === 'wide' || !active) {
     if (wide) { outPos.fromArray(wide.position); outTarget.fromArray(wide.target); return; }
-    const p = active ? active.root.position : new THREE.Vector3(), h = active?.headY || 1.5;
+    const p = active ? active.root.position : new THREE.Vector3(), h = active ? headHeight(active) : 1.5;
     outPos.set(p.x, p.y + h * 0.82, p.z + h * 1.55);
     outTarget.set(p.x, p.y + h * 0.72, p.z);
     return;
@@ -789,7 +809,7 @@ function shotPose(name, outPos, outTarget) {
     active.root.localToWorld(outTarget.fromArray(saved.target));
     return;
   }
-  const root = active.root.position, h = active.headY;
+  const root = active.root.position, h = headHeight(active);
   const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(active.root.quaternion);
   if (wide) {
     const toWide = new THREE.Vector3().fromArray(wide.position).sub(root).setY(0).normalize();
@@ -892,7 +912,7 @@ function setEditing(on) {
   orbit.enabled = on;
   spotsGroup.visible = on;
   if (on) {
-    const target = layout.camera?.target || (active ? toArr(active.root.position.clone().add(new THREE.Vector3(0, active.headY * 0.6, 0))) : [0, 1, 0]);
+    const target = layout.camera?.target || (active ? toArr(active.root.position.clone().add(new THREE.Vector3(0, headHeight(active) * 0.6, 0))) : [0, 1, 0]);
     orbit.target.fromArray(target);
     orbit.update();
     refreshFiles();
@@ -902,6 +922,7 @@ function setEditing(on) {
     buildActionsUI();
     $('charLooks').value = layout.character?.appearance || '';
     $('charRoom').value = layout.character?.room || '';
+    $('charSize').value = active ? characterScale(active) : 1;
   } else {
     select(null);
     applyViewCamera();
