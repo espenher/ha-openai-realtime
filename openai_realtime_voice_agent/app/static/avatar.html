@@ -1181,12 +1181,16 @@ function updateActivity(ch, dt, now) {
 
 // ---------- reading book ----------
 // While she plays a reading animation (one with "read" in its name), the book from
-// "Reading book.glb" lies open in her palms, facing her, its pages turning on the
-// animation's own clock. It's placed from her hands every frame rather than fixed to
-// one hand, so it fits any model and any of the reading poses.
+// "Reading book.glb" lies open in her hands, facing her, its pages turning on the
+// animation's own clock. She holds it in her left hand; the right one comes and goes
+// to turn the pages. Where it sits in that hand is worked out once per animation,
+// from a moment both palms are on it (their usual distance apart), so it fits any
+// model and any of the reading poses. A reading animation whose hands are usually
+// further apart than a book is wide (one hand on her knee, say) gets no book.
 const BOOK_FILE = /^reading book\.glb$/i;
 const BOOK_WIDTH = 0.26;   // metres across the open book at Size 1
 const BOOK_LIFT = 0.025;   // how far it sits off her palms, toward her face
+const BOOK_HANDS_APART = 0.3;   // metres at Size 1: further apart than this, they aren't holding a book
 let book = null;
 const bookAt = new THREE.Vector3();
 async function loadBook() {
@@ -1201,31 +1205,73 @@ async function loadBook() {
   scene.add(root);
   const mixer = new THREE.AnimationMixer(g.scene);
   for (const clip of g.animations) mixer.clipAction(clip).play();
-  book = { root, mixer, width: width || 1, duration: Math.max(0, ...g.animations.map(c => c.duration)) };
+  book = { root, mixer, width: width || 1, duration: Math.max(0, ...g.animations.map(c => c.duration)),
+           inHand: new Map() };   // character file + animation -> the book's matrix in her left hand
 }
-function updateBook(ch) {
-  if (!book || ch !== active) return;
-  const reading = ch.current && /read/i.test(ch.current) && !ch.move ? ch.actions.get(ch.current) : null;
+const palm = (h, side) => {
+  const wrist = h.getNormalizedBoneNode(`${side}Hand`)?.getWorldPosition(new THREE.Vector3());
+  const knuckle = h.getNormalizedBoneNode(`${side}MiddleProximal`)?.getWorldPosition(new THREE.Vector3());
+  return wrist && wrist.lerp(knuckle || wrist, 0.5);
+};
+// The book's world matrix for the pose she's in now: open between her palms, facing her.
+function bookBetweenPalms(ch) {
   const h = ch.vrm.humanoid;
-  const at = name => h.getNormalizedBoneNode(name)?.getWorldPosition(new THREE.Vector3());
-  const lh = reading && at('leftHand'), rh = reading && at('rightHand'), head = reading && at('head');
-  book.root.visible = !!(lh && rh && head && ch.root.visible);
-  if (!book.root.visible) return;
-  // Palms: halfway from the wrist to the middle finger's knuckle.
-  const palmL = lh.clone().lerp(at('leftMiddleProximal') || lh, 0.5);
-  const palmR = rh.clone().lerp(at('rightMiddleProximal') || rh, 0.5);
+  const palmL = palm(h, 'left'), palmR = palm(h, 'right');
+  const head = h.getNormalizedBoneNode('head')?.getWorldPosition(new THREE.Vector3());
+  if (!palmL || !palmR || !head) return null;
   const centre = palmL.clone().add(palmR).multiplyScalar(0.5);
   const across = palmR.sub(palmL);
-  if (across.lengthSq() < 1e-8) return;
+  if (across.lengthSq() < 1e-8) return null;
   across.normalize();
   const toFace = head.sub(centre);
   toFace.addScaledVector(across, -toFace.dot(across)).normalize();
   const along = new THREE.Vector3().crossVectors(across, toFace);
-  book.root.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(across, toFace, along));
   const size = ch.root.scale.y;
-  book.root.scale.setScalar(BOOK_WIDTH * size / book.width);
-  book.root.position.copy(centre).addScaledVector(toFace, BOOK_LIFT * size);
-  bookAt.copy(centre).addScaledVector(toFace, 0.05 * size);
+  const turn = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(across, toFace, along));
+  return new THREE.Matrix4().compose(centre.addScaledVector(toFace, BOOK_LIFT * size), turn,
+                                     new THREE.Vector3().setScalar(BOOK_WIDTH * size / book.width));
+}
+// Play the animation on its own for a moment, find the book between her palms where
+// they're their usual distance apart, and keep that relative to her left hand.
+function bookInHand(ch, name) {
+  const key = `${ch.file}|${name}`;
+  if (book.inHand.has(key)) return book.inHand.get(key);
+  const h = ch.vrm.humanoid, clip = ch.actions.get(name).getClip();
+  const rig = h.getNormalizedBoneNode('hips').parent, hand = h.getNormalizedBoneNode('leftHand');
+  const saved = [];
+  rig.traverse(o => saved.push([o, o.position.clone(), o.quaternion.clone(), o.scale.clone()]));
+  const mixer = new THREE.AnimationMixer(ch.vrm.scene);
+  mixer.clipAction(clip).setLoop(THREE.LoopOnce, 1).play().clampWhenFinished = true;
+  const poseAt = t => { mixer.setTime(t); rig.updateMatrixWorld(true); };
+  const apart = [];
+  for (let i = 0; i < 16; i++) {
+    poseAt(clip.duration * i / 16);
+    const l = palm(h, 'left'), r = palm(h, 'right');
+    apart.push([clip.duration * i / 16, l && r ? l.distanceTo(r) : 0]);
+  }
+  const usual = apart.map(a => a[1]).sort((a, b) => a - b)[8];
+  const [when] = apart.reduce((best, a) => Math.abs(a[1] - usual) < Math.abs(best[1] - usual) ? a : best);
+  poseAt(when);
+  const there = usual < BOOK_HANDS_APART * ch.root.scale.y ? bookBetweenPalms(ch) : null;
+  const inHand = there && hand ? new THREE.Matrix4().copy(hand.matrixWorld).invert().multiply(there) : null;
+  mixer.stopAllAction();
+  mixer.uncacheRoot(ch.vrm.scene);
+  for (const [o, position, quaternion, scale] of saved) { o.position.copy(position); o.quaternion.copy(quaternion); o.scale.copy(scale); }
+  rig.updateMatrixWorld(true);
+  book.inHand.set(key, inHand);
+  return inHand;
+}
+function updateBook(ch) {
+  if (!book || ch !== active) return;
+  const reading = ch.current && /read/i.test(ch.current) && !ch.move ? ch.actions.get(ch.current) : null;
+  const hand = ch.vrm.humanoid.getNormalizedBoneNode('leftHand');
+  const inHand = reading && hand && ch.root.visible ? bookInHand(ch, ch.current) : null;
+  book.root.visible = !!inHand;
+  if (!inHand) return;
+  hand.updateWorldMatrix(true, false);
+  new THREE.Matrix4().multiplyMatrices(hand.matrixWorld, inHand)
+    .decompose(book.root.position, book.root.quaternion, book.root.scale);
+  bookAt.set(0, 0.2 * book.width, 0).applyMatrix4(book.root.matrix.compose(book.root.position, book.root.quaternion, book.root.scale));
   if (book.duration) book.mixer.setTime(reading.time % book.duration);
 }
 
