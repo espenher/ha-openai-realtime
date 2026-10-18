@@ -1206,12 +1206,12 @@ function updateActivity(ch, dt, now) {
 
 // ---------- reading book ----------
 // While she plays a reading animation (one with "read" in its name), the book from
-// "Reading book.glb" is held up open in front of her, pages toward her eyes and the
-// cover toward the room, her hands behind it (as the reading set's own pictures show).
-//  - Hands close together: it stands between them, held by the left hand (the right
-//    one comes and goes to turn the pages).
-//  - Hands apart (one resting somewhere): the raised hand holds it one-handed at the
-//    bottom middle, the book standing up from it.
+// "Reading book.glb" is held up open in front of her (kept still, no page turning):
+// pages toward her eyes, the cover toward the room, standing on her hands, as the
+// reading set's own pictures show it.
+//  - Hands close together: its bottom edge rests on both (it follows the left one).
+//  - Hands apart (one resting somewhere): its bottom edge sits in the raised hand's
+//    palm, held one-handed at the bottom middle.
 // Where it sits in the holding hand is worked out once per animation, from a moment
 // the hands are as they usually are, so it fits any model and any reading pose.
 const BOOK_FILE = /^reading book\.glb$/i;
@@ -1228,14 +1228,34 @@ async function loadBook() {
   root.add(g.scene);
   root.visible = false;
   scene.add(root);
+  // Its animation opens it and turns a page; it's kept still, open, at the moment the
+  // turning page sticks out least toward the reader. Its resting shape is a closed book.
   const mixer = new THREE.AnimationMixer(g.scene);
   for (const clip of g.animations) mixer.clipAction(clip).play();
-  // Measure it open, as the animation has it (its resting shape is a closed book): open
-  // along x, tall along y, its pages facing -z. The covers aren't flat but a shallow V,
-  // so keep where the back cover is across the width (in each slice, its furthest point
-  // from the pages, measured toward them).
-  mixer.setTime(0);
-  g.scene.updateMatrixWorld(true);
+  const duration = Math.max(0, ...g.animations.map(c => c.duration));
+  const shapeAt = t => {
+    mixer.setTime(t);
+    g.scene.updateMatrixWorld(true);
+    const points = [], v = new THREE.Vector3();
+    g.scene.traverse(o => {
+      if (!o.isMesh) return;
+      for (let i = 0; i < o.geometry.attributes.position.count; i++) points.push(o.getVertexPosition(i, v).applyMatrix4(o.matrixWorld).clone());
+    });
+    return points;
+  };
+  let still = 0, flattest = -Infinity;
+  for (let i = 0; i < 24 && duration; i++) {
+    const t = duration * i / 24, out = Math.min(...shapeAt(t).map(q => q.z));   // pages face -z
+    if (out > flattest) { flattest = out; still = t; }
+  }
+  shapeAt(still);
+  // Even then one page is always part-way over; the turning page has its own chain of
+  // bones, so fold it away to nothing and keep just the open book.
+  const page = g.scene.getObjectByName('Book_Page_001');
+  if (page) { page.scale.setScalar(1e-4); g.scene.updateMatrixWorld(true); }
+  // Measured open like that: wide along x, tall along y, its pages facing -z. The covers
+  // aren't flat but a shallow V, so keep where the back cover is across the width (in
+  // each slice, its furthest point from the pages, measured toward them).
   const points = [], v = new THREE.Vector3();
   g.scene.traverse(o => {
     if (!o.isMesh) return;
@@ -1245,8 +1265,7 @@ async function loadBook() {
   const back = new Array(24).fill(Infinity);
   const slice = x => Math.min(23, Math.max(0, Math.floor((x - box.min.x) / (size.x || 1) * 24)));
   for (const q of points) back[slice(q.x)] = Math.min(back[slice(q.x)], -q.z);
-  book = { root, mixer, width: size.x || 1, height: size.y || 1, top: box.max.y, bottom: box.min.y, back, slice,
-           duration: Math.max(0, ...g.animations.map(c => c.duration)),
+  book = { root, width: size.x || 1, height: size.y || 1, top: box.max.y, bottom: box.min.y, back, slice,
            inHand: new Map() };   // character file + animation -> [hand bone, the book's matrix in it]
 }
 const palmOf = (h, side) => {
@@ -1279,25 +1298,17 @@ function bookInPose(ch) {
     .flatMap(f => ['Proximal', 'Intermediate', 'Distal'].map(j => at_(`${side}${f}${j}`)))).filter(Boolean);
 
   if (L.distanceTo(R) < BOOK_HANDS_APART * size) {
-    // Both hands: the left one holds the book's left edge, palm and fingers against the
-    // back cover and the thumb over onto the pages; the right one rests on (and turns)
-    // the pages. So the pages face the way her left palm does (toward her), it sits
-    // level with its left edge in her left hand, and its back cover lies on that palm.
-    const wrist = at_('leftHand'), knuckle = at_('leftMiddleProximal');
-    const index = at_('leftIndexProximal'), little = at_('leftLittleProximal');
-    if (!wrist || !knuckle || !index || !little) return null;
-    const pages = new THREE.Vector3().crossVectors(index.sub(little), knuckle.sub(wrist)).normalize();
-    if (pages.dot(eyes.clone().sub(L)) < 0) pages.negate();
+    // Both hands: standing on them, its bottom edge on her palms, upright facing her
+    // eyes, level from her left hand to her right.
+    const hold = L.clone().add(R).multiplyScalar(0.5);
+    const middle = hold.clone().add(new THREE.Vector3(0, 0.5 * height, 0));
+    const pages = eyes.clone().sub(middle).normalize();
     const across = R.clone().sub(L);
     across.y = 0;
     across.addScaledVector(pages, -across.dot(pages)).normalize();
     const tall = new THREE.Vector3().crossVectors(across, pages);
     if (tall.y < 0) tall.negate();
-    const at = L.clone().addScaledVector(across, book.width * scale / 2 - 0.04 * size);
-    // Her left palm just behind the back cover where it holds it.
-    const cover = book.back[book.slice(L.clone().sub(at).dot(modelX(pages, tall)) / scale)];
-    const depth = L.clone().sub(at).dot(pages) - (Number.isFinite(cover) ? cover * scale : 0) + 0.012 * size;
-    at.addScaledVector(pages, depth);
+    const at = hold.clone().addScaledVector(tall, -book.bottom * scale + 0.01 * size);
     return { hand: 'left', matrix: pose(pages, tall, at) };
   }
 
@@ -1359,7 +1370,6 @@ function updateBook(ch) {
     .decompose(book.root.position, book.root.quaternion, book.root.scale);
   book.root.updateMatrix();
   bookAt.set(0, 0, -0.2 * book.width).applyMatrix4(book.root.matrix);
-  if (book.duration) book.mixer.setTime(reading.time % book.duration);
 }
 
 // A gesture can ask for its own framing (full body by default) while it plays.
