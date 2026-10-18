@@ -233,7 +233,7 @@ function retarget(asset, vrm) {
       for (let i = 0; i < values.length; i += 4) q.fromArray(values, i).premultiply(parentRest).multiply(restInv).toArray(values, i);
       tracks.push(new THREE.QuaternionKeyframeTrack(`${node.name}.${property}`, track.times,
         values.map((x, i) => (vrm0 && i % 2 === 0 ? -x : x))));
-    } else if (track instanceof THREE.VectorKeyframeTrack && mixamoBone(rigName) === 'mixamorigHips') {
+    } else if (property === 'position' && mixamoBone(rigName) === 'mixamorigHips') {
       // Keep the character on its spot: hips may bob up and down, but sideways
       // and forward stay at the model's own rest position, so no animation
       // shifts or walks it out of view.
