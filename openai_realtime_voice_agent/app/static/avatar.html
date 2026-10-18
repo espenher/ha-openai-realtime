@@ -88,12 +88,12 @@
   <h2>Animation</h2>
   <div class="row"><select id="testAnim"></select><button id="playAnim">▶ Play</button></div>
   <h2>Character</h2>
-  <p>Nabu's idea of herself. Her clothes and colours right now are added automatically.</p>
+  <p>Her idea of herself. Her clothes and colours right now are added automatically.</p>
   <textarea id="charLooks" placeholder="How she looks: hair, eyes, outfit…"></textarea>
   <textarea id="charRoom" placeholder="Her room: what's in it, what it feels like…"></textarea>
   <div class="row">Size <input id="charSize" type="number" step="0.02" min="0.3" max="2" value="1"></div>
   <h2>Moods &amp; gestures</h2>
-  <p>Tags Nabu can put in her replies. Moods set her face, gestures play an animation once. The note tells her when
+  <p>Tags she can put in her replies. Moods set her face, gestures play an animation once. The note tells her when
      to use it. Saved with the room; she knows about changes right away.</p>
   <details id="actions"><summary></summary><div id="actionList"></div>
     <div class="row" style="margin-top:6px"><button id="addMood">+ Mood</button><button id="addGesture">+ Gesture</button>
@@ -379,7 +379,9 @@ function showPersona(persona) {
   const ch = characters.get(modelFor(persona));
   if (!ch) return;
   const key = (persona || '').toLowerCase();
-  ch.style = params.get(`${key}_style`) || STYLE_DEFAULTS[key] || null;
+  // The second persona (whatever she's called) prefers the _female animations.
+  ch.style = params.get(`${key}_style`) || STYLE_DEFAULTS[key]
+    || (tagPersona && key === tagPersona.toLowerCase() ? 'female' : null);
   const changed = ch !== active;
   if (changed) {
     if (active) active.root.visible = false;
@@ -1191,6 +1193,12 @@ async function loadCatalogue() {
     const info = await (await fetch('actions', { cache: 'no-store' })).json();
     defaultActions = info.defaults || [];
     tagPersona = info.persona || null;
+    if (tagPersona && info.model && characters.has(info.model)) {
+      const key = tagPersona.toLowerCase();
+      const changed = personaModels[key] !== info.model;
+      personaModels[key] = info.model;
+      if (changed && normTag(activePersona) === normTag(tagPersona)) showPersona(activePersona);
+    }
   } catch (e) { console.warn('actions', e); }
   catalogue = Array.isArray(layout.actions) ? layout.actions : defaultActions;
   workActions = null;

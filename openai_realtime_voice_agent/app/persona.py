@@ -57,6 +57,8 @@ class PersonaConfig:
     # persona (see ha_agent.py), and an optional input_boolean that turns it on/off.
     second_agent: str = ""
     second_agent_switch: str = ""
+    # Her avatar model's file name; empty = the .vrm whose name contains her name.
+    second_model_file: str = ""
 
     @property
     def second_available(self) -> bool:
@@ -79,6 +81,7 @@ class PersonaConfig:
             speed=_float_env("ELEVENLABS_SPEED"),
             second_agent=_env("SECOND_PERSONA_AGENT"),
             second_agent_switch=_env("SECOND_PERSONA_AGENT_SWITCH"),
+            second_model_file=_env("SECOND_PERSONA_MODEL"),
         )
 
     def persona_for_option(self, option: str | None) -> str:

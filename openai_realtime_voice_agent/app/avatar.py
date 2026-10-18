@@ -232,9 +232,10 @@ class AvatarHub:
                             headers={"Cache-Control": "no-cache"})
 
     async def _get_actions(self, request: web.Request) -> web.Response:
-        # "persona": whose replies carry the tags (the page only applies them to that character).
+        # "persona": whose replies carry the tags (the page only applies them to that character);
+        # "model": her avatar file when set in the options (else the page matches it by name).
         return web.json_response({"actions": avatar_actions(), "defaults": DEFAULT_ACTIONS,
-                                  "persona": PERSONA.second_name})
+                                  "persona": PERSONA.second_name, "model": PERSONA.second_model_file or None})
 
     async def _put_layout(self, request: web.Request) -> web.Response:
         try:

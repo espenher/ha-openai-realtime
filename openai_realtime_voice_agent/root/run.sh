@@ -86,7 +86,7 @@ if bashio::config.has_value 'second_persona_instructions'; then
     SECOND_PERSONA_INSTRUCTIONS=$(bashio::config 'second_persona_instructions')
     export SECOND_PERSONA_INSTRUCTIONS
 fi
-for opt in second_persona_agent second_persona_agent_switch; do
+for opt in second_persona_agent second_persona_agent_switch second_persona_model; do
     if bashio::config.has_value "$opt"; then
         export "${opt^^}=$(bashio::config "$opt")"
     fi

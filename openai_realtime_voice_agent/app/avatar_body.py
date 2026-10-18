@@ -60,7 +60,11 @@ def colour_name(hex_: str) -> str:
 
 
 def second_model() -> Path | None:
-    """The second persona's model file: the .vrm whose name contains her name (like the page picks it)."""
+    """The second persona's model file: the one set in the options, else the .vrm whose name contains her name."""
+    if PERSONA.second_model_file:
+        for directory in MEDIA_DIRS:
+            if (directory / PERSONA.second_model_file).is_file():
+                return directory / PERSONA.second_model_file
     key = PERSONA.second_name.lower()
     for directory in MEDIA_DIRS:
         if directory.is_dir():

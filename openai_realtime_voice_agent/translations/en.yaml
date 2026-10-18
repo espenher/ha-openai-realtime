@@ -252,6 +252,11 @@ configuration:
       Optional input_boolean (e.g. input_boolean.nabu_uses_agent). When
       set, the agent above is used only while it is on, checked each time
       the device wakes. Empty = always use the agent when one is set.
+  second_persona_model:
+    name: "👥 Persona · Second persona's avatar model file"
+    description: >-
+      Optional. The .vrm file in media/avatar that shows the second persona
+      (e.g. Nabu.vrm). Empty = the .vrm whose file name contains her name.
   elevenlabs_api_key:
     name: "👥 Persona · ElevenLabs API key"
     description: >-
