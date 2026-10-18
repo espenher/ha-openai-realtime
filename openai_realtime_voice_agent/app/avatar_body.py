@@ -144,7 +144,7 @@ def describe_state(layout: dict, model: Path) -> str:
 # Clothes and colours she can also change with tags, which works where she has
 # no tools (when a Home Assistant agent answers for her): [take off jacket],
 # [put on jacket], [hair pink], [jacket burgundy], [eyes amber].
-TAG_CLOTHES = ("jacket", "tie", "socks", "sneakers", "shirt", "skirt", "top", "panties")
+TAG_CLOTHES = ("jacket", "tie", "socks", "sneakers")
 OUTFIT_TAG = re.compile(r"^(take off|remove|put on|wear)\s+(?:your\s+|my\s+)?(.+)$")
 
 
