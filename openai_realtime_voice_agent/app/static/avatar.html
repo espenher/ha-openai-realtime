@@ -306,6 +306,10 @@ async function loadCharacter(file, animations) {
   const g = await vrmLoader.loadAsync(`files/${encodeURIComponent(file)}`);
   const vrm = g.userData.vrm;
   VRMUtils.rotateVRM0(vrm);
+  // three.js culls a skinned mesh by its bounds in the rest pose, not where the
+  // animation put it, so close up the sneakers and socks blinked out while still
+  // in view. One character is cheap enough to always draw.
+  vrm.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
   // The model sits in its own holder: placing and turning the holder leaves
   // the model's own rotation alone (VRM 0.x models are turned 180° inside).
   const root = new THREE.Group();
