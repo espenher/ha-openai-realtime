@@ -923,7 +923,7 @@ function scaleSpringBones(ch, size) {
 }
 function placeCharacter() {
   if (!active) return;
-  if ((!active.away && !active.move) || editing) {
+  if (!active.away && !active.move) {
     const spot = homeSpot();
     active.root.position.fromArray(spot?.position || [0, 0, 0]);
     active.root.rotation.y = spot?.rotationY || 0;
@@ -1046,7 +1046,7 @@ function danceAnimation(ch) {
 }
 function goDance(ch) {
   const anim = danceAnimation(ch);
-  if (!anim || ch.away === 'dance' || ch.move || editing) return;
+  if (!anim || ch.away === 'dance' || ch.move) return;
   const start = () => {
     const action = ch.actions.get(anim);
     action.setLoop(THREE.LoopRepeat, Infinity);
@@ -1055,6 +1055,7 @@ function goDance(ch) {
     if (ch.current === anim) ch.current = null;
     ch.away = 'dance';
     play(ch, anim, 0.4);
+    reportActivity(ch);
   };
   if (ch.away === 'sit') {
     goHome(ch);
@@ -1065,6 +1066,7 @@ function stopDance(ch) {
   if (ch.away !== 'dance') return;
   ch.away = null;
   play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.5);
+  reportActivity(ch);
 }
 let quietSince = performance.now() / 1000;
 const angleTo = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
@@ -1088,24 +1090,51 @@ function walkTo(ch, spot, arrive) {
 }
 function goSit(ch) {
   const spot = sitSpot();
-  if (!spot || ch.away === 'sit' || ch.move || editing) return;
-  walkTo(ch, spot, () => {
-    const anim = sitAnimation(ch, spot);
-    if (!anim) { ch.away = 'standing'; return; }
-    ch.away = 'sit';
-    play(ch, anim, 0.5);
-    // The marker's height is the seat's; left on the floor, assume an ordinary chair.
-    const y = spot.position?.[1] ?? 0;
-    ch.seat = { y: y > 0.15 ? y : y + 0.45 * ch.root.scale.y, settleAt: performance.now() / 1000 + 0.6 };
-  });
+  if (!spot || ch.away === 'sit' || ch.move) return;
+  walkTo(ch, spot, () => sitAt(ch, spot));
+}
+function sitAt(ch, spot) {
+  const anim = sitAnimation(ch, spot);
+  if (!anim) { ch.away = 'standing'; return; }
+  ch.away = 'sit';
+  play(ch, anim, 0.5);
+  // The marker's height is the seat's; left on the floor, assume an ordinary chair.
+  const y = spot.position?.[1] ?? 0;
+  ch.seat = { y: y > 0.15 ? y : y + 0.45 * ch.root.scale.y, settleAt: performance.now() / 1000 + 0.6 };
+  reportActivity(ch);
 }
 function goHome(ch) {
   const spot = homeSpot();
-  if (!spot || (!ch.away && !ch.move) || editing) return;
+  if (!spot || (!ch.away && !ch.move)) return;
   ch.seat = null;
   ch.liftTo = spot.position?.[1] ?? 0;   // back down to the floor as she gets up
   ch.away = null;
-  walkTo(ch, spot, () => play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.5));
+  walkTo(ch, spot, () => {
+    play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.5);
+    reportActivity(ch);
+  });
+}
+// The add-on keeps what she's doing, tells her, and passes it between pages: a page
+// reports each change, follows changes other pages report, and one that's just been
+// opened (or reloaded) starts out the same, already in her chair if she's sitting.
+const activityOf = ch => ch.away === 'sit' ? 'sitting' : ch.away === 'dance' ? 'dancing' : 'standing';
+const isTagPersona = ch => ch === active && normTag(activePersona) === normTag(tagPersona);
+function reportActivity(ch) {
+  if (isTagPersona(ch) && socket?.readyState === WebSocket.OPEN)
+    socket.send(JSON.stringify({ type: 'activity', value: activityOf(ch) }));
+}
+function followActivity(ch, value, justOpened) {
+  if (!isTagPersona(ch) || ch.move || value === activityOf(ch)) return;
+  if (value === 'sitting') {
+    const spot = sitSpot();
+    if (!spot) return;
+    if (!justOpened) { goSit(ch); return; }
+    ch.root.position.fromArray(spot.position || [0, 0, 0]);
+    ch.root.rotation.y = spot.rotationY || 0;
+    sitAt(ch, spot);
+  }
+  else if (value === 'dancing') goDance(ch);
+  else goHome(ch);
 }
 function updateActivity(ch, dt, now) {
   const root = ch.root;
@@ -1583,7 +1612,12 @@ function onMessage(msg) {
       lastPhase = msg.phase || 'idle';
       if (msg.persona) showPersona(msg.persona);
       setStatus(`${msg.persona || ''} connected`, true);
+      // Just opened: start out as she is. Reconnected (the add-on restarted): tell it.
+      if (active && !connectedBefore && msg.activity) followActivity(active, msg.activity, true);
+      else if (active) reportActivity(active);
+      connectedBefore = true;
       break;
+    case 'activity': if (active) followActivity(active, msg.value, false); break;
     case 'persona': showPersona(msg.value); break;
     case 'phase':
       if (msg.value === 'idle' && lastPhase !== 'idle') idleSince = now;
@@ -1616,8 +1650,9 @@ function onMessage(msg) {
       break;
   }
 }
+let socket = null, connectedBefore = false;
 function connect() {
-  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  const ws = socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   ws.onmessage = e => { try { onMessage(JSON.parse(e.data)); } catch {} };
   ws.onclose = () => { setStatus('Reconnecting…'); setTimeout(connect, 3000); };
 }

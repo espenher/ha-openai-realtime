@@ -23,7 +23,7 @@ from app.audio_recording_service import AudioRecordingService
 from app.phase_emitter import PhaseEmitter, STALE_AUDIO, TURN_LIVENESS
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
 from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap
-from app.avatar_body import avatar_instructions, body_tag_action
+from app.avatar_body import avatar_instructions, body_tag_action, describe_activity
 from app.ha_agent import MODE as AGENT_MODE, AgentReplies, HAConversationAgent
 from app.transcript_logger import TranscriptLogger
 
@@ -898,7 +898,7 @@ class WebSocketHandler:
         async def _answer_with_agent(text: str) -> None:
             TURN_LIVENESS.tool_started()   # keeps the thinking watchdog from giving up while the agent works
             try:
-                reply = await ha_agent.ask(text, avatar_instructions(for_agent=True))
+                reply = await ha_agent.ask(text, avatar_instructions(for_agent=True), describe_activity())
             except asyncio.CancelledError:
                 logger.info("🧠 agent answer dropped (stopped or superseded)")
                 raise
@@ -938,7 +938,7 @@ class WebSocketHandler:
         self.quick_switch_persona = _quick_switch_persona
 
         async def _refresh_avatar_instructions() -> None:
-            """The editor saved new moods/gestures: tell the live second-persona session."""
+            """The editor saved new moods/gestures, or she sat/stood/danced: tell the live second-persona session."""
             if PERSONA_STATE.active != SECOND:
                 return
             instructions, _ = _persona_settings(SECOND)
@@ -947,11 +947,12 @@ class WebSocketHandler:
                 await openai_service.send_client_event(openai_rt_events.SessionUpdateEvent(
                     session=openai_rt_events.SessionProperties(instructions=instructions)
                 ))
-                logger.info("🧍 avatar moods/gestures updated in the live session")
+                logger.info("🧍 avatar instructions updated in the live session")
             except Exception as e:
                 logger.warning(f"🧍 could not update the live session's avatar instructions: {e!r}")
 
         AVATAR.on_layout_saved = _refresh_avatar_instructions
+        AVATAR.on_activity = _refresh_avatar_instructions
 
         async def _switch_persona(option: str, greet: bool = True) -> None:
             """Make the persona named by the input_select option active."""

@@ -141,6 +141,27 @@ def describe_state(layout: dict, model: Path) -> str:
     return " ".join(lines)
 
 
+def _animations() -> set[str]:
+    return {p.stem for d in MEDIA_DIRS if d.is_dir() for p in d.iterdir() if p.suffix.lower() in (".fbx", ".vrma")}
+
+
+def _can_dance(layout: dict) -> bool:
+    animations = _animations()
+    return (layout.get("character") or {}).get("dance") in animations or any("dance" in a.lower() for a in animations)
+
+
+def describe_activity(layout: dict | None = None) -> str:
+    """Whether she's standing, sitting or dancing, as the avatar page last reported it."""
+    layout = load_layout() if layout is None else layout
+    if HUB.activity == "sitting":
+        return "You're sitting in your chair."
+    if HUB.activity == "dancing":
+        return "You're dancing."
+    if any(spot.get("type") == "sit" for spot in layout.get("spots") or []) or _can_dance(layout):
+        return "You're standing on your spot."
+    return ""
+
+
 # Clothes and colours she can also change with tags, which works where she has
 # no tools (when a Home Assistant agent answers for her): [take off jacket],
 # [put on jacket], [hair pink], [jacket burgundy], [eyes amber].
@@ -177,8 +198,7 @@ def avatar_instructions(for_agent: bool = False) -> str:
         if key not in seen:
             seen.add(key)
             actions.append(action)
-    animations = {p.stem for d in MEDIA_DIRS if d.is_dir() for p in d.iterdir()
-                  if p.suffix.lower() in (".fbx", ".vrma")}
+    animations = _animations()
     moods = [a for a in actions if a.get("kind") == "mood" and a.get("tag")]
     gestures = [a for a in actions if a.get("kind") == "gesture" and a.get("tag") and a.get("animation") in animations]
 
@@ -189,10 +209,10 @@ def avatar_instructions(for_agent: bool = False) -> str:
              "Never call yourself an avatar, a model or a character, and never talk about animations or tags."]
     if character.get("appearance"):
         parts.append("\n\nHow you look: " + character["appearance"].strip())
+    now = " ".join(filter(None, [describe_state(layout, model) if model else "", describe_activity(layout)]))
+    if now:
+        parts.append("\n\nRight now: " + now)
     if model:
-        state = describe_state(layout, model)
-        if state:
-            parts.append("\n\nRight now: " + state)
         colours = colour_variants(model)
         tag_clothes = [w for w in TAG_CLOTHES if CHANGEABLE[w] in model_garments(model)]
         clothes = [w for w, g in CHANGEABLE.items() if g in model_garments(model)]
@@ -229,7 +249,7 @@ def avatar_instructions(for_agent: bool = False) -> str:
         parts.append("\n\nMoving around: [sit down] walk over and sit in your chair; [stand up] get up and come "
                      "back to your spot. You also go and sit by yourself when nobody has talked to you for a while.")
     # The page loops her dance (the one picked in the editor, else one with "dance" in its name) until told to stop.
-    if character.get("dance") in animations or any("dance" in name.lower() for name in animations):
+    if _can_dance(layout):
         parts.append("\n\nDancing: [start dancing] you dance, and keep dancing while you talk, until [stop dancing]. "
                      "Dance when you're asked to, and stop when you're asked to stop (or to stop the music).")
     return "".join(parts)

@@ -4,13 +4,20 @@ A small aiohttp server (its own port) serves a web page, the user's model and
 animation files from Home Assistant's media folder, and a websocket that
 streams what the page needs to animate:
 
-  {"type": "state", "phase": ..., "persona": ...}   on connect
+  {"type": "state", "phase": ..., "persona": ..., "activity": ...}   on connect
   {"type": "phase", "value": "listening" | "thinking" | "replying" | "idle"}
   {"type": "persona", "value": "<name>"}
   {"type": "wake"} / {"type": "interrupt"}
   {"type": "tag", "value": "<tag>"}                 a [tag] from the second persona's reply (mood or gesture)
   {"type": "env", "dt": 0.02, "values": [...]}       loudness of the reply audio,
                                                       one value per 20 ms, for lip-sync
+  {"type": "activity", "value": "standing" | "sitting" | "dancing"}
+                                                      what the second persona is doing
+
+Pages send {"type": "activity", "value": ...} back when she gets there (she sits
+down by herself after a quiet spell too). The hub keeps the latest, passes it on
+to the other pages, gives it to pages that open later (so a reload keeps her in
+her chair) and tells her (avatar_body.describe_activity).
 
 Files live in Home Assistant's media folder under avatar/ (uploaded with
 PUT /files/<name>, or copied in over Samba). Files from older versions, which
@@ -51,6 +58,7 @@ OLD_UPLOAD_DIR = pathlib.Path("/data/avatar")
 MEDIA_DIRS = (UPLOAD_DIR, pathlib.Path("/media"))
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_SUFFIXES = {".vrm", ".fbx", ".vrma", ".glb", ".png", ".jpg", ".jpeg"}
+ACTIVITIES = ("standing", "sitting", "dancing")
 ENVELOPE_STEP_S = 0.02
 
 # What the second persona's avatar can do: moods (a facial expression that stays)
@@ -120,10 +128,16 @@ class AvatarHub:
 
     def __init__(self) -> None:
         self._clients: set[web.WebSocketResponse] = set()
-        self._state = {"phase": "idle", "persona": None}
+        self._state = {"phase": "idle", "persona": None, "activity": "standing"}
         # Set by the websocket handler: refreshes the live session's instructions
-        # when the editor saves new moods/gestures.
+        # when the editor saves new moods/gestures, and when she sits, stands or dances.
         self.on_layout_saved = None
+        self.on_activity = None
+
+    @property
+    def activity(self) -> str:
+        """What the second persona's avatar is doing, as the pages last reported it."""
+        return self._state["activity"]
 
     # ---------- server ----------
     async def start(self, port: int) -> None:
@@ -260,9 +274,26 @@ class AvatarHub:
             async for msg in ws:
                 if msg.type == WSMsgType.ERROR:
                     break
+                if msg.type == WSMsgType.TEXT:
+                    self._from_page(msg.data)
         finally:
             self._clients.discard(ws)
         return ws
+
+    def _from_page(self, data: str) -> None:
+        try:
+            msg = json.loads(data)
+        except ValueError:
+            return
+        if not isinstance(msg, dict) or msg.get("type") != "activity":
+            return
+        value = msg.get("value")
+        if value not in ACTIVITIES or value == self._state["activity"]:
+            return
+        logger.info(f"🧍 avatar is {value} now")
+        self.send({"type": "activity", "value": value})
+        if self.on_activity:
+            asyncio.create_task(self.on_activity())
 
     # ---------- sending ----------
     @property
@@ -270,7 +301,7 @@ class AvatarHub:
         return bool(self._clients)
 
     def send(self, obj: dict) -> None:
-        if obj.get("type") in ("phase", "persona"):
+        if obj.get("type") in ("phase", "persona", "activity"):
             self._state[obj["type"]] = obj.get("value")
         for ws in list(self._clients):
             if not ws.closed:

@@ -10,7 +10,9 @@ the avatar, ElevenLabs voice, phases to the device.
 
 The conversation API takes no extra system prompt, so the avatar context (body,
 room, moods and gestures) goes in front of the first message of each agent
-conversation, marked as not coming from the user.
+conversation, marked as not coming from the user. If what she's doing changes
+during a conversation (she sat down by herself, say), the next turn starts with a
+line saying so.
 
 second_persona_agent_switch optionally names an input_boolean: the agent is then
 used only while it is on, so the second persona can flip between the realtime
@@ -80,12 +82,17 @@ class HAConversationAgent:
     def __init__(self) -> None:
         self._conversation_id: str | None = None
         self._last = 0.0
+        self._told = ""   # the situation she was last told about
 
-    async def ask(self, text: str, context: str) -> str:
+    async def ask(self, text: str, context: str, situation: str = "") -> str:
+        """situation: what she's doing right now (also in context); repeated when it changes."""
         new = self._conversation_id is None or time.monotonic() - self._last > CONVERSATION_IDLE_S
         if new and context.strip():
             text = ("(Context for you, not said by the user; don't mention it.)\n" + context.strip()
                     + "\n(End of context.)\n\n" + text)
+        elif situation and situation != self._told:
+            text = f"(Right now, not said by the user: {situation})\n\n" + text
+        self._told = situation
         body = {"text": text, "agent_id": PERSONA.second_agent}
         if not new:
             body["conversation_id"] = self._conversation_id
