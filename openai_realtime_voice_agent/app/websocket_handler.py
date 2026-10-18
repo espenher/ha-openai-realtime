@@ -516,7 +516,8 @@ class WebSocketHandler:
         agent_components = [agent_replies] if agent_replies else []
         tag_components = []
         if PERSONA.second_available:
-            tag_components = [AvatarTags(body_tag_action)]
+            tag_components = [AvatarTags(body_tag_action,
+                                         on_silent_reply=lambda: phase_emitter.force_idle("reply was only tags"))]
             from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
             from app.elevenlabs_tts import SafeElevenLabsTTSService
             tts_service = SafeElevenLabsTTSService(

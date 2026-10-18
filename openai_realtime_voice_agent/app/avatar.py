@@ -309,11 +309,15 @@ class AvatarTags(FrameProcessor):
     until it closes (or the reply ends).
     """
 
-    def __init__(self, body_tag_action=None) -> None:
+    def __init__(self, body_tag_action=None, on_silent_reply=None) -> None:
         super().__init__()
         self._held = ""
         # Optional: given a tag's text, the outfit/colour change it asks for (avatar_body.body_tag_action).
         self._body_tag_action = body_tag_action
+        # Optional: called when a reply was only tags. Nothing gets spoken then, so
+        # without it the device sat in "thinking" until the watchdog gave up.
+        self._on_silent_reply = on_silent_reply
+        self._tagged = self._spoke = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -326,6 +330,7 @@ class AvatarTags(FrameProcessor):
             if unfinished:
                 text, self._held = text[: unfinished.start()], text[unfinished.start():]
             for tag in TAG.finditer(text):
+                self._tagged = True
                 value = tag.group(1).strip().lower()
                 logger.info(f"🧍 tag: {value}")
                 change = self._body_tag_action(value) if self._body_tag_action else None
@@ -335,14 +340,21 @@ class AvatarTags(FrameProcessor):
                     HUB.send({"type": "tag", "value": value})
             text = TAG.sub("", text)
             if text:
+                self._spoke = self._spoke or bool(text.strip())
                 frame.text = text
                 await self.push_frame(frame, direction)
             return
         if isinstance(frame, LLMFullResponseStartFrame):
             self._held = ""
-        elif isinstance(frame, LLMFullResponseEndFrame) and self._held:
-            held, self._held = self._held, ""
-            await self.push_frame(LLMTextFrame(held), direction)
+            self._tagged = self._spoke = False
+        elif isinstance(frame, LLMFullResponseEndFrame):
+            if self._held:
+                held, self._held = self._held, ""
+                self._spoke = True
+                await self.push_frame(LLMTextFrame(held), direction)
+            if self._tagged and not self._spoke and self._on_silent_reply:
+                logger.info("🧍 reply was only tags → ending the turn")
+                asyncio.create_task(self._on_silent_reply())
         await self.push_frame(frame, direction)
 
 

@@ -216,7 +216,8 @@ def avatar_instructions(for_agent: bool = False) -> str:
     if moods or gestures:
         parts.append("\n\n# Your face and movements\n"
                      "You move your face and body with tags in square brackets inside your replies. They are never "
-                     "spoken, and you only use the ones listed here.")
+                     "spoken, and you only use the ones listed here. Tags never replace words: always say something "
+                     "as well.")
     if moods:
         parts.append("\n\nMoods (your facial expression; it stays until you change it). Start every reply with "
                      "one, and put a new one mid-reply when your mood shifts:\n" + "\n".join(map(line, moods)))
