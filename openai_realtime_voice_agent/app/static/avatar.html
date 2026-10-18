@@ -92,6 +92,7 @@
   <textarea id="charLooks" placeholder="How she looks: hair, eyes, outfit…"></textarea>
   <textarea id="charRoom" placeholder="Her room: what's in it, what it feels like…"></textarea>
   <div class="row">Size <input id="charSize" type="number" step="0.02" min="0.3" max="2" value="1"></div>
+  <div class="row" title="What she dances when asked to (until she's asked to stop)">Dance <select id="charDance"></select></div>
   <h2>Moods &amp; gestures</h2>
   <p>Tags she can put in her replies. Moods set her face, gestures play an animation once. The note tells her when
      to use it. Saved with the room; she knows about changes right away.</p>
@@ -671,6 +672,10 @@ function buildActionsUI() {
 }
 $('charLooks').onchange = () => { (layout.character ??= {}).appearance = $('charLooks').value.trim(); };
 $('charRoom').onchange = () => { (layout.character ??= {}).room = $('charRoom').value.trim(); };
+$('charDance').onchange = () => {
+  const value = $('charDance').value;
+  if (value === '(automatic)') delete (layout.character ??= {}).dance; else (layout.character ??= {}).dance = value;
+};
 $('charSize').onchange = () => {
   if (!active) return;
   const size = Math.max(0.3, Math.min(2, Number($('charSize').value) || 1));
@@ -950,6 +955,7 @@ let shot = 'wide', shotSince = -Infinity, snapCamera = true, idleSince = -Infini
 let gestureShot = null, gestureShotUntil = 0;
 function wantedShot(now) {
   if (gestureShot && now < gestureShotUntil) return gestureShot;
+  if (active?.away === 'dance' && lastPhase !== 'idle') return 'full';   // the whole dance, even while she talks
   if (lastPhase === 'replying') return 'close';
   if (lastPhase === 'listening' || lastPhase === 'thinking') return 'full';
   return shot !== 'wide' && now - idleSince < SHOT_BACK_TO_WIDE_S ? 'full' : 'wide';
@@ -1027,9 +1033,44 @@ const TURN_SPEED = 3.5;       // radians per second
 const SIT_WORDS = new Set(['sit down', 'sit', 'go sit', 'take a seat', 'sit in your chair']);
 const STAND_WORDS = new Set(['stand up', 'get up', 'stand']);
 const sitSpot = () => (layout.spots || []).find(s => s.type === 'sit');
+// Dancing: [start dancing] and she dances on her spot (getting up from the chair
+// first), over and over and while she talks, until [stop dancing] (or [stand up]).
+// Her dance is the one picked under Character in the editor, else the first
+// animation with "dance" in its name.
+const DANCE_WORDS = new Set(['start dancing', 'dance', 'dancing', 'dance for me']);
+const STOP_DANCE_WORDS = new Set(['stop dancing', 'stop dance', 'stop']);
+function danceAnimation(ch) {
+  const chosen = layout.character?.dance;
+  if (chosen && ch.actions.has(chosen)) return chosen;
+  return [...ch.actions.keys()].filter(n => /dance/i.test(n)).sort()[0];
+}
+function goDance(ch) {
+  const anim = danceAnimation(ch);
+  if (!anim || ch.away === 'dance' || ch.move || editing) return;
+  const start = () => {
+    const action = ch.actions.get(anim);
+    action.setLoop(THREE.LoopRepeat, Infinity);
+    action.clampWhenFinished = false;
+    ch.gestureEnds = 0;
+    if (ch.current === anim) ch.current = null;
+    ch.away = 'dance';
+    play(ch, anim, 0.4);
+  };
+  if (ch.away === 'sit') {
+    goHome(ch);
+    if (ch.move) ch.move.arrive = start;
+  } else start();
+}
+function stopDance(ch) {
+  if (ch.away !== 'dance') return;
+  ch.away = null;
+  play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.5);
+}
 let quietSince = performance.now() / 1000;
 const angleTo = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
 function activityTag(ch, tag) {
+  if (DANCE_WORDS.has(tag)) { goDance(ch); return true; }
+  if (STOP_DANCE_WORDS.has(tag)) { stopDance(ch); return true; }
   if (SIT_WORDS.has(tag)) { goSit(ch); return true; }
   if (STAND_WORDS.has(tag)) { goHome(ch); return true; }
   return false;
@@ -1188,6 +1229,7 @@ function setEditing(on) {
     $('charLooks').value = layout.character?.appearance || '';
     $('charRoom').value = layout.character?.room || '';
     $('charSize').value = active ? characterScale(active) : 1;
+    fillSelect($('charDance'), ['(automatic)', ...(active ? active.actions.keys() : [])], layout.character?.dance || '(automatic)');
   } else {
     select(null);
     applyViewCamera();
@@ -1621,7 +1663,8 @@ renderer.setAnimationLoop(() => {
 // Handle for poking at the scene from the browser console.
 window.avatar = { scene, camera, roomGroup, get layout() { return layout; }, get active() { return active; },
   sit: () => active && goSit(active), stand: () => active && goHome(active),
-  gesture: (name, seconds, start) => active && playGesture(active, name, seconds, start) };
+  gesture: (name, seconds, start) => active && playGesture(active, name, seconds, start),
+  message: msg => onMessage(msg) };   // test hook: as if the add-on had sent it
 
 boot().catch(e => setStatus(`Failed to start: ${e.message}`));
 </script>

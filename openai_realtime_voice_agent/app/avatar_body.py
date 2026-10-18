@@ -228,6 +228,10 @@ def avatar_instructions(for_agent: bool = False) -> str:
     if any(spot.get("type") == "sit" for spot in layout.get("spots") or []):
         parts.append("\n\nMoving around: [sit down] walk over and sit in your chair; [stand up] get up and come "
                      "back to your spot. You also go and sit by yourself when nobody has talked to you for a while.")
+    # The page loops her dance (the one picked in the editor, else one with "dance" in its name) until told to stop.
+    if character.get("dance") in animations or any("dance" in name.lower() for name in animations):
+        parts.append("\n\nDancing: [start dancing] you dance, and keep dancing while you talk, until [stop dancing]. "
+                     "Dance when you're asked to, and stop when you're asked to stop (or to stop the music).")
     return "".join(parts)
 
 
