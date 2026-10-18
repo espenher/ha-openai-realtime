@@ -142,7 +142,13 @@ def avatar_instructions() -> str:
     layout = load_layout()
     character = layout.get("character") or {}
     model = second_model()
-    actions = avatar_actions()
+    # The page only ever uses the first entry with a given tag, so list only that one.
+    actions, seen = [], set()
+    for action in avatar_actions():
+        key = " ".join(str(action.get("tag", "")).lower().replace("_", " ").replace("-", " ").split())
+        if key not in seen:
+            seen.add(key)
+            actions.append(action)
     animations = {p.stem for d in MEDIA_DIRS if d.is_dir() for p in d.iterdir()
                   if p.suffix.lower() in (".fbx", ".vrma")}
     moods = [a for a in actions if a.get("kind") == "mood" and a.get("tag")]

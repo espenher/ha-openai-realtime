@@ -445,10 +445,17 @@ function buildActionsUI() {
   list.innerHTML = '';
   const expressions = active?.vrm.expressionManager?.expressions.map(e => e.expressionName) || [];
   const animations = active ? [...active.actions.keys()] : [];
+  const seen = new Set();
   for (const a of editableActions()) {
     const box = el('div', { className: 'act' });
     const tag = el('input', { type: 'text', className: 'tag', value: a.tag, placeholder: 'tag' });
-    tag.onchange = () => { a.tag = tag.value.trim(); actionsChanged(); };
+    tag.onchange = () => { a.tag = tag.value.trim(); actionsChanged(); buildActionsUI(); };
+    // Only the first entry with a tag is ever used; flag the others.
+    if (seen.has(normTag(a.tag))) {
+      tag.style.borderColor = 'var(--danger)';
+      tag.title = 'Another entry above already uses this tag, so this one is ignored';
+    }
+    seen.add(normTag(a.tag));
     const kind = el('span', { textContent: a.kind === 'gesture' ? 'gesture' : 'mood' });
     kind.style.cssText = 'color: var(--muted); font-size: 12px';
     const test = el('button', { textContent: '▶', title: 'Try it' });
