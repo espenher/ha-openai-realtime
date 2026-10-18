@@ -271,7 +271,7 @@ function retarget(asset, vrm) {
 // afresh for every frame to put each ankle where the motion's ankle goes, measured
 // from where it starts, scaled and kept on the spot exactly like the hips
 // (keepOnSpot), with each foot turned as the motion turns it. Only while a foot is
-// planted (near its lowest and barely moving): one swinging in the air keeps the
+// planted (on the floor and barely moving): one swinging in the air keeps the
 // motion's own joint angles, since chasing its position with her proportions can ask
 // for more reach than her leg has and lock it straight.
 function plantFeet(result, asset, clip, vrm, motionHips, hipsScale, flip) {
@@ -301,6 +301,9 @@ function plantFeet(result, asset, clip, vrm, motionHips, hipsScale, flip) {
     return mixer;
   };
   const assetPose = pose(asset);
+  // Each ankle's height standing in the rest pose: the floor, as far as a foot goes.
+  asset.updateMatrixWorld(true);
+  const floor = legs.map(l => motionHips.parent.worldToLocal(l.source.getWorldPosition(new THREE.Vector3())).y);
   const sourceMixer = play(asset, clip);
   const goals = legs.map(() => []);
   for (const t of times) {
@@ -313,15 +316,21 @@ function plantFeet(result, asset, clip, vrm, motionHips, hipsScale, flip) {
   restore(assetPose);
   asset.updateMatrixWorld(true);
 
-  // How planted each foot is, frame by frame: 1 within 3 cm of its lowest and under
-  // 0.15 m/s, fading to 0 by 7 cm up or 0.45 m/s.
+  // How planted each foot is, frame by frame: 1 within 4 cm of the floor and under
+  // 0.3 m/s for a while (the fastest within 0.1 s either side), fading to 0 by 8 cm up
+  // or 0.6 m/s. Feet swinging under a seat never get near the floor, so they're left
+  // to the motion's own joint angles.
   const clamp01 = x => Math.min(1, Math.max(0, x));
-  const planted = goals.map(g => {
-    const low = Math.min(...g.map(v => v.y)), last = g.length - 1;
-    return g.map((v, k) => {
+  const planted = goals.map((g, i) => {
+    const last = g.length - 1;
+    const speeds = g.map((v, k) => {
       const a = Math.max(0, k - 1), b = Math.min(last, k + 1);
-      const speed = g[b].distanceTo(g[a]) * hipsScale / ((times[b] - times[a]) || 1);
-      return clamp01(1 - ((v.y - low) * hipsScale - 0.03) / 0.04) * clamp01(1 - (speed - 0.15) / 0.3);
+      return g[b].distanceTo(g[a]) * hipsScale / ((times[b] - times[a]) || 1);
+    });
+    return g.map((v, k) => {
+      let speed = 0;
+      for (let j = 0; j <= last; j++) if (Math.abs(times[j] - times[k]) <= 0.1) speed = Math.max(speed, speeds[j]);
+      return clamp01(1 - ((v.y - floor[i]) * hipsScale - 0.04) / 0.04) * clamp01(1 - (speed - 0.3) / 0.3);
     });
   });
 
@@ -1197,16 +1206,16 @@ function updateActivity(ch, dt, now) {
 
 // ---------- reading book ----------
 // While she plays a reading animation (one with "read" in its name), the book from
-// "Reading book.glb" is open in her hands, pages toward her, turning on the
-// animation's own clock. Two grips, from how the animation holds its hands:
-//  - both palms up, close together: the book lies open on them (held by the left
-//    hand; the right one comes and goes to turn the pages);
-//  - hands apart (one resting somewhere): one-handed, the bottom of the spine in the
-//    raised hand's palm, the book standing up from it.
+// "Reading book.glb" is held up open in front of her, pages toward her eyes and the
+// cover toward the room, her hands behind it (as the reading set's own pictures show).
+//  - Hands close together: it stands between them, held by the left hand (the right
+//    one comes and goes to turn the pages).
+//  - Hands apart (one resting somewhere): the raised hand holds it one-handed at the
+//    bottom middle, the book standing up from it.
 // Where it sits in the holding hand is worked out once per animation, from a moment
 // the hands are as they usually are, so it fits any model and any reading pose.
 const BOOK_FILE = /^reading book\.glb$/i;
-const BOOK_WIDTH = 0.26;        // metres across the open book at Size 1
+const BOOK_WIDTH = 0.28;        // metres across the open book at Size 1
 const BOOK_HANDS_APART = 0.3;   // metres at Size 1: further apart than this, one hand holds it
 let book = null;
 const bookAt = new THREE.Vector3();
@@ -1227,48 +1236,34 @@ async function loadBook() {
            duration: Math.max(0, ...g.animations.map(c => c.duration)),
            inHand: new Map() };   // character file + animation -> [hand bone, the book's matrix in it]
 }
-// A hand as the book sees it: palm centre, the way the fingers point, and the way the palm faces.
-function handOf(h, side) {
-  const at = name => h.getNormalizedBoneNode(name)?.getWorldPosition(new THREE.Vector3());
-  const wrist = at(`${side}Hand`), knuckle = at(`${side}MiddleProximal`);
-  const index = at(`${side}IndexProximal`), little = at(`${side}LittleProximal`);
-  if (!wrist || !knuckle || !index || !little) return null;
-  const fingers = knuckle.clone().sub(wrist).normalize();
-  const across = index.sub(little);
-  const facing = new THREE.Vector3().crossVectors(across, fingers).normalize();
-  return { centre: wrist.lerp(knuckle, 0.5), fingers, facing };
-}
+const palmOf = (h, side) => {
+  const wrist = h.getNormalizedBoneNode(`${side}Hand`)?.getWorldPosition(new THREE.Vector3());
+  const knuckle = h.getNormalizedBoneNode(`${side}MiddleProximal`)?.getWorldPosition(new THREE.Vector3());
+  return wrist && wrist.lerp(knuckle || wrist, 0.5);
+};
 // The book's world matrix for the pose she's in now, and which hand holds it.
 function bookInPose(ch) {
   const h = ch.vrm.humanoid, size = ch.root.scale.y;
   const head = h.getNormalizedBoneNode('head')?.getWorldPosition(new THREE.Vector3());
-  const L = handOf(h, 'left'), R = handOf(h, 'right');
+  const L = palmOf(h, 'left'), R = palmOf(h, 'right');
   if (!head || !L || !R) return null;
-  // Palms toward her (the book lies on them), whichever way round the bones were built.
-  for (const hand of [L, R]) if (hand.facing.dot(head.clone().sub(hand.centre)) < 0) hand.facing.negate();
-  const scale = new THREE.Vector3().setScalar(BOOK_WIDTH * size / book.width);
-  const basis = (x, y, z, at) => new THREE.Matrix4().compose(at,
-    new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z)), scale);
-  if (L.centre.distanceTo(R.centre) < BOOK_HANDS_APART * size) {
-    // Open on both palms: pages facing the way the palms do, across from left hand to right.
-    const across = R.centre.clone().sub(L.centre).normalize();
-    const pages = L.facing.clone().add(R.facing);
-    pages.addScaledVector(across, -pages.dot(across)).normalize();
-    const tall = new THREE.Vector3().crossVectors(across, pages);
-    const fingers = L.fingers.clone().add(R.fingers).normalize();
-    const at = L.centre.clone().add(R.centre).multiplyScalar(0.5)
-      .addScaledVector(fingers, 0.03 * size).addScaledVector(pages, 0.012 * size);
-    return { hand: 'left', matrix: basis(across, pages, tall, at) };
-  }
-  // One-handed: the higher hand holds it, the spine standing up from its palm.
-  const hand = L.centre.y > R.centre.y ? L : R;
-  const tall = hand.facing.clone();
-  const pages = head.clone().sub(hand.centre);
-  pages.addScaledVector(tall, -pages.dot(tall)).normalize();
-  const across = new THREE.Vector3().crossVectors(pages, tall);
-  const at = hand.centre.clone().addScaledVector(tall, book.height * scale.x * 0.45)
-    .addScaledVector(pages, 0.035 * size);   // in front of the palm: the fingers go behind it
-  return { hand: hand === L ? 'left' : 'right', matrix: basis(across, pages, tall, at) };
+  const scale = BOOK_WIDTH * size / book.width, height = book.height * scale;
+  const two = L.distanceTo(R) < BOOK_HANDS_APART * size;
+  const hold = two ? L.clone().add(R).multiplyScalar(0.5) : (L.y > R.y ? L : R);
+  // Standing up from her hands (its bottom edge at them), facing her eyes from there;
+  // across runs from her left hand's side to her right.
+  const eyes = head.clone().add(new THREE.Vector3(0, 0.06 * size, 0));
+  const middle = hold.clone().add(new THREE.Vector3(0, 0.45 * height, 0));
+  const pages = eyes.clone().sub(middle).normalize();
+  const across = two ? R.clone().sub(L) : new THREE.Vector3(0, 1, 0).cross(pages);
+  across.addScaledVector(pages, -across.dot(pages)).normalize();
+  const tall = new THREE.Vector3().crossVectors(across, pages);
+  if (tall.y < 0) { tall.negate(); across.negate(); }
+  // At her hands' depth, a centimetre out, so her fingers curl round onto the cover.
+  const at = hold.clone().addScaledVector(tall, 0.42 * height).addScaledVector(pages, -0.01 * size);
+  const turn = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(across, pages, tall));
+  return { hand: two || hold === L ? 'left' : 'right',
+           matrix: new THREE.Matrix4().compose(at, turn, new THREE.Vector3().setScalar(scale)) };
 }
 // Play the animation on its own for a moment where her hands are as they usually are
 // (their usual distance apart), place the book, and keep it relative to the holding hand.
@@ -1285,8 +1280,8 @@ function bookInHand(ch, name) {
   const apart = [];
   for (let i = 0; i < 16; i++) {
     poseAt(clip.duration * i / 16);
-    const l = handOf(h, 'left'), r = handOf(h, 'right');
-    apart.push([clip.duration * i / 16, l && r ? l.centre.distanceTo(r.centre) : 0]);
+    const l = palmOf(h, 'left'), r = palmOf(h, 'right');
+    apart.push([clip.duration * i / 16, l && r ? l.distanceTo(r) : 0]);
   }
   const usual = apart.map(a => a[1]).sort((a, b) => a - b)[8];
   const [when] = apart.reduce((best, a) => Math.abs(a[1] - usual) < Math.abs(best[1] - usual) ? a : best);
