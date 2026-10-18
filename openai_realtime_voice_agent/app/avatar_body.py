@@ -223,6 +223,10 @@ def avatar_instructions(for_agent: bool = False) -> str:
     if gestures:
         parts.append("\n\nGestures (a short movement, done once where you put the tag). Use one only when it "
                      "really fits, at most one or two per reply:\n" + "\n".join(map(line, gestures)))
+    # The avatar page walks her to the room's sit spot and back (and does so by itself after a quiet spell).
+    if any(spot.get("type") == "sit" for spot in layout.get("spots") or []):
+        parts.append("\n\nMoving around: [sit down] walk over and sit in your chair; [stand up] get up and come "
+                     "back to your spot. You also go and sit by yourself when nobody has talked to you for a while.")
     return "".join(parts)
 
 

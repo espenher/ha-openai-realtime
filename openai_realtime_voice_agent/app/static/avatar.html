@@ -361,6 +361,7 @@ function phaseAnimation(phase) {
   return /idle/i;
 }
 function playFor(ch, pattern) {
+  if (ch.move || ch.away) return;   // walking or sitting: activities pick the animation
   const current = ch.current && ch.actions.get(ch.current);
   const busy = current && current.loop === THREE.LoopOnce && current.isRunning();
   if (busy) return;
@@ -781,9 +782,13 @@ function scaleSpringBones(ch, size) {
 }
 function placeCharacter() {
   if (!active) return;
-  const spot = homeSpot();
-  active.root.position.fromArray(spot?.position || [0, 0, 0]);
-  active.root.rotation.y = spot?.rotationY || 0;
+  if ((!active.away && !active.move) || editing) {
+    const spot = homeSpot();
+    active.root.position.fromArray(spot?.position || [0, 0, 0]);
+    active.root.rotation.y = spot?.rotationY || 0;
+    active.away = null;
+    active.move = null;
+  }
   active.root.scale.setScalar(characterScale(active));
   scaleSpringBones(active, characterScale(active));
   // Let hair and skirt start from rest at the new place instead of whipping across.
@@ -841,8 +846,17 @@ function shotPose(name, outPos, outTarget) {
     outTarget.y += 0.02;
     span = 0.62;
   } else {
-    outTarget.set(root.x, root.y + h * 0.52, root.z);
-    span = h * 1.3;
+    // From her actual head and feet, so a seated pose is framed as well as a standing one.
+    const bone = b => active.vrm.humanoid.getNormalizedBoneNode(b)?.getWorldPosition(new THREE.Vector3());
+    const head = bone('head'), hips = bone('hips'), feet = [bone('leftFoot'), bone('rightFoot')].filter(Boolean);
+    if (head && hips && feet.length) {
+      const top = head.y + 0.2 * active.root.scale.y, bottom = Math.min(...feet.map(f => f.y)) - 0.05;
+      outTarget.set(hips.x, (top + bottom) / 2, hips.z);
+      span = Math.max(0.6, (top - bottom) * 1.15);
+    } else {
+      outTarget.set(root.x, root.y + h * 0.52, root.z);
+      span = h * 1.3;
+    }
   }
   const dist = (span / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   outPos.copy(outTarget).addScaledVector(dir, dist);
@@ -862,6 +876,99 @@ function updateDirector(dt, now) {
   camera.lookAt(camTarget);
   snapCamera = false;
 }
+// ---------- activities: walking to the chair and sitting ----------
+// The second persona can leave her home spot for the room's sit spot. She turns,
+// walks there in a straight line (an animation with "walk" in its name, played in
+// place; without one she glides in her idle), turns the way the spot's arrow
+// points and sits with the spot's animation (or one with "sit" in its name),
+// lowered so her hips rest on the marker: raise the sit marker to the seat (left on the
+// floor it assumes an ordinary chair height). She
+// goes after a quiet spell or when she says [sit down]; [stand up] brings her
+// back. Seated she still talks, but without talking animations or gestures.
+const IDLE_TO_SIT_S = 90;     // quiet seconds before she goes and sits
+const WALK_SPEED = 0.7;       // metres per second at Size 1
+const TURN_SPEED = 3.5;       // radians per second
+const SIT_WORDS = new Set(['sit down', 'sit', 'go sit', 'take a seat', 'sit in your chair']);
+const STAND_WORDS = new Set(['stand up', 'get up', 'stand']);
+const sitSpot = () => (layout.spots || []).find(s => s.type === 'sit');
+let quietSince = performance.now() / 1000;
+const angleTo = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from));
+function activityTag(ch, tag) {
+  if (SIT_WORDS.has(tag)) { goSit(ch); return true; }
+  if (STAND_WORDS.has(tag)) { goHome(ch); return true; }
+  return false;
+}
+function sitAnimation(ch, spot) {
+  if (spot.animation && ch.actions.has(spot.animation)) return spot.animation;
+  return [...ch.actions.keys()].find(n => /sit/i.test(n) && !/to sit|to stand/i.test(n));
+}
+function walkTo(ch, spot, arrive) {
+  ch.move = { target: new THREE.Vector3().fromArray(spot.position || [0, 0, 0]), faceY: spot.rotationY || 0, arrive };
+  const walk = find(ch, /walk/i);
+  play(ch, walk || find(ch, /idle/i), 0.4);
+}
+function goSit(ch) {
+  const spot = sitSpot();
+  if (!spot || ch.away === 'sit' || ch.move || editing) return;
+  walkTo(ch, spot, () => {
+    const anim = sitAnimation(ch, spot);
+    if (!anim) { ch.away = 'standing'; return; }
+    ch.away = 'sit';
+    play(ch, anim, 0.5);
+    // The marker's height is the seat's; left on the floor, assume an ordinary chair.
+    const y = spot.position?.[1] ?? 0;
+    ch.seat = { y: y > 0.15 ? y : y + 0.45 * ch.root.scale.y, settleAt: performance.now() / 1000 + 0.6 };
+  });
+}
+function goHome(ch) {
+  const spot = homeSpot();
+  if (!spot || (!ch.away && !ch.move) || editing) return;
+  ch.seat = null;
+  ch.liftTo = spot.position?.[1] ?? 0;   // back down to the floor as she gets up
+  ch.away = null;
+  walkTo(ch, spot, () => play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.5));
+}
+function updateActivity(ch, dt, now) {
+  const root = ch.root;
+  // Seated: once the pose has settled, lower her so her hips rest on the sit marker.
+  if (ch.seat && now > ch.seat.settleAt && ch.seat.offset === undefined) {
+    const hips = ch.vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(new THREE.Vector3());
+    ch.seat.offset = hips.y - root.position.y;
+    ch.liftTo = ch.seat.y - ch.seat.offset;
+  }
+  if (ch.liftTo !== undefined) {
+    root.position.y += (ch.liftTo - root.position.y) * Math.min(1, dt * 4);
+    if (Math.abs(ch.liftTo - root.position.y) < 0.002) { root.position.y = ch.liftTo; ch.liftTo = undefined; }
+  }
+  const m = ch.move;
+  if (m) {
+    const dx = m.target.x - root.position.x, dz = m.target.z - root.position.z, dist = Math.hypot(dx, dz);
+    if (dist > 0.03) {
+      const heading = Math.atan2(dx, dz), turn = angleTo(root.rotation.y, heading);
+      root.rotation.y += Math.sign(turn) * Math.min(Math.abs(turn), TURN_SPEED * dt);
+      if (Math.abs(turn) < 0.6) {
+        const step = Math.min(dist, WALK_SPEED * root.scale.y * dt);
+        root.position.x += dx / dist * step;
+        root.position.z += dz / dist * step;
+      }
+    } else {
+      root.position.x = m.target.x;
+      root.position.z = m.target.z;
+      const turn = angleTo(root.rotation.y, m.faceY);
+      root.rotation.y += Math.sign(turn) * Math.min(Math.abs(turn), TURN_SPEED * dt);
+      if (Math.abs(turn) < 0.01) {
+        root.rotation.y = m.faceY;
+        ch.move = null;
+        m.arrive();
+      }
+    }
+    return;
+  }
+  // A quiet spell sends her to the chair (the second persona only).
+  if (!ch.away && !editing && lastPhase === 'idle' && now - quietSince > IDLE_TO_SIT_S
+      && normTag(activePersona) === normTag(tagPersona) && ch === active) goSit(ch);
+}
+
 // A gesture can ask for its own framing (full body by default) while it plays.
 function frameGesture(ch, name, want, seconds, start) {
   const clip = ch.actions.get(name)?.getClip();
@@ -1204,9 +1311,11 @@ async function loadCatalogue() {
   workActions = null;
 }
 function onTag(ch, tag) {
+  if (activityTag(ch, normTag(tag))) return;
   const action = findAction(tag) || findAction(MOOD_ALIASES[normTag(tag)]);
   if (!action) return;
   if (action.kind === 'gesture') {
+    if (ch.move || ch.away) return;   // no gestures while walking or seated
     playGesture(ch, action.animation, action.seconds, action.start);
     frameGesture(ch, action.animation, action.shot, action.seconds, action.start);
   }
@@ -1241,7 +1350,8 @@ function endGestureIfDue(ch, now) {
   if (!ch.gestureEnds || now < ch.gestureEnds) return;
   ch.gestureEnds = 0;
   const current = ch.current && ch.actions.get(ch.current);
-  if (current?.loop === THREE.LoopOnce && current.isRunning()) play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.6);
+  if (current?.loop === THREE.LoopOnce && current.isRunning() && !ch.move && !ch.away)
+    play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.6);
 }
 function updateMood(ch, dt, now) {
   const em = ch.vrm.expressionManager;
@@ -1290,13 +1400,14 @@ function onMessage(msg) {
     case 'persona': showPersona(msg.value); break;
     case 'phase':
       if (msg.value === 'idle' && lastPhase !== 'idle') idleSince = now;
+      quietSince = now;
       lastPhase = msg.value;
       if (active) playFor(active, phaseAnimation(msg.value));
       if (active && msg.value !== 'replying' && active.moodUntil === Infinity) active.moodUntil = now + MOOD_HOLD;
       break;
     case 'tag': if (active) onTag(active, msg.value); break;
     case 'wake': {
-      if (!active) break;
+      if (!active || active.move || active.away) break;
       const wave = normTag(activePersona) === normTag(tagPersona) && findAction('wave');
       if (wave?.kind === 'gesture' && active.actions.has(wave.animation)) {
         playGesture(active, wave.animation, wave.seconds, wave.start);
@@ -1339,6 +1450,7 @@ renderer.setAnimationLoop(() => {
   updateGaze(dt, now);
   for (const ch of characters.values()) {
     if (!ch.root.visible) continue;
+    updateActivity(ch, dt, now);
     endGestureIfDue(ch, now);
     ch.mixer.update(dt);
     updateHeadTurn(ch, dt);
@@ -1362,7 +1474,8 @@ renderer.setAnimationLoop(() => {
 });
 
 // Handle for poking at the scene from the browser console.
-window.avatar = { scene, camera, roomGroup, get layout() { return layout; }, get active() { return active; } };
+window.avatar = { scene, camera, roomGroup, get layout() { return layout; }, get active() { return active; },
+  sit: () => active && goSit(active), stand: () => active && goHome(active) };
 
 boot().catch(e => setStatus(`Failed to start: ${e.message}`));
 </script>
