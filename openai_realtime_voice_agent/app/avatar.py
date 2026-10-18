@@ -217,7 +217,10 @@ class AvatarHub:
         path = directory / request.match_info["name"]
         if path.parent != directory or path.suffix.lower() not in ALLOWED_SUFFIXES or not path.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(path)
+        # Files get replaced under the same name (a re-exported room, a new
+        # texture), so browsers must check before reusing a cached copy; an
+        # unchanged file still comes back as a cheap 304.
+        return web.FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     # The room layout (placed furniture, edited room objects, spots, camera),
     # written by the page's edit mode. Kept next to the uploaded files.
