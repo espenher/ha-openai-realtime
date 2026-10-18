@@ -137,8 +137,32 @@ def describe_state(layout: dict, model: Path) -> str:
     return " ".join(lines)
 
 
-def avatar_instructions() -> str:
-    """The part of the second persona's instructions about her body, room, moods and gestures."""
+# Clothes and colours she can also change with tags, which works where she has
+# no tools (when a Home Assistant agent answers for her): [take off jacket],
+# [put on jacket], [hair pink], [jacket burgundy], [eyes amber].
+TAG_CLOTHES = ("jacket", "tie", "socks", "sneakers")
+OUTFIT_TAG = re.compile(r"^(take off|remove|put on|wear)\s+(?:your\s+|my\s+)?(.+)$")
+
+
+def body_tag_action(value: str) -> Callable[[], Awaitable[str]] | None:
+    """If a [tag] changes her outfit or a colour, the change to make; None for moods and gestures."""
+    m = OUTFIT_TAG.match(value)
+    if m and m.group(2) in TAG_CLOTHES:
+        item, wear = m.group(2), m.group(1) in ("put on", "wear")
+        return lambda: change_outfit(item, wear)
+    words = value.split(None, 1)
+    if len(words) == 2 and words[0] in COLOUR_SLOTS:
+        part, colour = words
+        return lambda: change_colour(part, colour)
+    return None
+
+
+def avatar_instructions(for_agent: bool = False) -> str:
+    """The part of the second persona's instructions about her body, room, moods and gestures.
+
+    for_agent: written for a Home Assistant agent, which has none of the add-on's
+    tools, so outfit and colour changes are offered as tags instead.
+    """
     layout = load_layout()
     character = layout.get("character") or {}
     model = second_model()
@@ -165,9 +189,17 @@ def avatar_instructions() -> str:
         state = describe_state(layout, model)
         if state:
             parts.append("\n\nRight now: " + state)
-        clothes = [w for w, g in CHANGEABLE.items() if g in model_garments(model)]
         colours = colour_variants(model)
-        if clothes or colours:
+        tag_clothes = [w for w in TAG_CLOTHES if CHANGEABLE[w] in model_garments(model)]
+        clothes = [w for w, g in CHANGEABLE.items() if g in model_garments(model)]
+        if for_agent and (tag_clothes or colours):
+            offers = ([f"[take off {tag_clothes[0]}] and [put on {tag_clothes[0]}]"
+                       + (f" (also your {_and(tag_clothes[1:])})" if len(tag_clothes) > 1 else "")] if tag_clothes else [])
+            offers += [f"[{part} <colour>] ({_option_words(options)})" for part, options in colours.items()]
+            parts.append("\n\nYou can change some of your clothes and colours yourself, when you're asked to or when "
+                         "you feel like it, with a tag where you do it: " + "; ".join(offers)
+                         + ". Use \"original\" for your usual colour. The rest of your outfit stays as it is.")
+        elif clothes or colours:
             parts.append("\n\nYou can change these yourself with change_outfit and change_colour, when you're "
                          "asked to or when you feel like it: "
                          + "; ".join(([f"take off or put on your {_and(clothes)}"] if clothes else [])

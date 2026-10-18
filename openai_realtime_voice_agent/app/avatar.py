@@ -308,9 +308,11 @@ class AvatarTags(FrameProcessor):
     until it closes (or the reply ends).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, body_tag_action=None) -> None:
         super().__init__()
         self._held = ""
+        # Optional: given a tag's text, the outfit/colour change it asks for (avatar_body.body_tag_action).
+        self._body_tag_action = body_tag_action
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
@@ -325,7 +327,11 @@ class AvatarTags(FrameProcessor):
             for tag in TAG.finditer(text):
                 value = tag.group(1).strip().lower()
                 logger.info(f"🧍 tag: {value}")
-                HUB.send({"type": "tag", "value": value})
+                change = self._body_tag_action(value) if self._body_tag_action else None
+                if change:
+                    asyncio.create_task(change())
+                else:
+                    HUB.send({"type": "tag", "value": value})
             text = TAG.sub("", text)
             if text:
                 frame.text = text

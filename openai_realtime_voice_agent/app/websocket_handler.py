@@ -23,7 +23,7 @@ from app.audio_recording_service import AudioRecordingService
 from app.phase_emitter import PhaseEmitter, STALE_AUDIO, TURN_LIVENESS
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
 from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap
-from app.avatar_body import avatar_instructions
+from app.avatar_body import avatar_instructions, body_tag_action
 from app.ha_agent import MODE as AGENT_MODE, AgentReplies, HAConversationAgent
 from app.transcript_logger import TranscriptLogger
 
@@ -516,7 +516,7 @@ class WebSocketHandler:
         agent_components = [agent_replies] if agent_replies else []
         tag_components = []
         if PERSONA.second_available:
-            tag_components = [AvatarTags()]
+            tag_components = [AvatarTags(body_tag_action)]
             from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
             from app.elevenlabs_tts import SafeElevenLabsTTSService
             tts_service = SafeElevenLabsTTSService(
@@ -897,7 +897,7 @@ class WebSocketHandler:
         async def _answer_with_agent(text: str) -> None:
             TURN_LIVENESS.tool_started()   # keeps the thinking watchdog from giving up while the agent works
             try:
-                reply = await ha_agent.ask(text, avatar_instructions())
+                reply = await ha_agent.ask(text, avatar_instructions(for_agent=True))
             except asyncio.CancelledError:
                 logger.info("🧠 agent answer dropped (stopped or superseded)")
                 raise
