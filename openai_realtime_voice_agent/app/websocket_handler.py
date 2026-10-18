@@ -841,8 +841,14 @@ class WebSocketHandler:
                 )],
             )
             await openai_service.send_client_event(openai_rt_events.ConversationItemCreateEvent(item=item))
+            # The persona's own output: pipecat's ResponseProperties defaults to
+            # spoken audio, which for the second persona (text, voiced by
+            # ElevenLabs) meant the realtime voice and hers speaking at once.
             await openai_service.send_client_event(openai_rt_events.ResponseCreateEvent(
-                response=openai_rt_events.ResponseProperties(tool_choice="none")
+                response=openai_rt_events.ResponseProperties(
+                    output_modalities=list(openai_service._session_properties.output_modalities or ["audio"]),
+                    tool_choice="none",
+                )
             ))
             logger.info(f"📣 announcement: {message[:120]}")
             return "ok"
