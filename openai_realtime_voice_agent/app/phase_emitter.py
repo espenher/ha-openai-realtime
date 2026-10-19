@@ -139,6 +139,12 @@ class PhaseEmitter(FrameProcessor):
     WATCHDOG_POLL_S = 1.0
     # How often to log that we're deliberately waiting on a running tool.
     INFLIGHT_LOG_EVERY_S = 30.0
+    # A voice spoken by our own TTS (ElevenLabs, the second persona) arrives sentence by
+    # sentence with pauses of well over half a second between them (0.65 s observed), so
+    # its turn only counts as over after this much silence: going idle at the first pause
+    # chimed the device's mic open, then the rest of the reply closed it again on the
+    # user's first words.
+    TTS_SENTENCE_GAP_S = 1.0
 
     def __init__(self, send_phase, idle_debounce_s: float = None, request_follow_up=None, **kwargs):
         """
@@ -336,6 +342,13 @@ class PhaseEmitter(FrameProcessor):
             return
         await self._finish_turn()
 
+    async def _finish_after(self, seconds: float) -> None:
+        try:
+            await asyncio.sleep(seconds)
+        except asyncio.CancelledError:
+            return
+        await self._finish_turn()
+
     async def _finish_turn(self) -> None:
         """Go idle, then ask the device to listen for an answer if the reply
         ended with a question."""
@@ -456,8 +469,13 @@ class PhaseEmitter(FrameProcessor):
             if self._turn_is_over():
                 # The final reply has finished and nothing else is coming, so
                 # skip the debounce: the LED goes idle (and a question hands
-                # over to the user) as soon as the speech actually ends.
-                await self._finish_turn()
+                # over to the user) as soon as the speech actually ends. Our own
+                # TTS still gets a moment to show it was only a pause.
+                from app.persona import STATE  # late import, as in _turn_is_over
+                if STATE.speaks_with_tts:
+                    self._idle_task = asyncio.create_task(self._finish_after(self.TTS_SENTENCE_GAP_S))
+                else:
+                    await self._finish_turn()
             else:
                 # Don't go idle immediately — TTS comes in segments. Only emit
                 # idle if the bot stays silent for the debounce window.
