@@ -61,10 +61,11 @@
 
 <div id="editor">
   <h1>Room editor</h1>
-  <p>Click an object to select it. G = move, R = rotate, S = scale, Delete = hide/remove. Drag empty space to look around.</p>
+  <p>Click an object to select it (click again to get the next one under it). G = move, R = rotate, S = scale, Delete = hide/remove. Drag empty space to look around.</p>
 
   <h2>Selected</h2>
   <div id="selName">Nothing</div>
+  <div class="row" title="Pick a spot here when markers overlap">Spot <select id="spotPick"></select></div>
   <div class="row">
     <button data-mode="translate" class="on">Move</button>
     <button data-mode="rotate">Rotate</button>
@@ -927,7 +928,18 @@ function loadSpots() {
   spotsGroup.clear();
   for (const spot of layout.spots || []) spotsGroup.add(spotMarker(spot));
   spotsGroup.visible = editing;
+  listSpots();
 }
+// The spots by name (or type and animation), to pick one that's hard to click.
+const spotLabel = s => s.name || `${s.type}${s.type === 'sit' ? `: ${s.animation || 'automatic'}` : ''}`;
+function listSpots() {
+  const pick = $('spotPick');
+  pick.innerHTML = '';
+  pick.append(Object.assign(document.createElement('option'), { value: '', textContent: '—' }));
+  for (const s of layout.spots || []) pick.append(Object.assign(document.createElement('option'), { value: s.id, textContent: spotLabel(s) }));
+  pick.value = selected?.userData.kind === 'spot' ? selected.userData.id : '';
+}
+$('spotPick').onchange = e => select(spotsGroup.children.find(m => m.userData.id === e.target.value) || null);
 const homeSpot = () => (layout.spots || []).find(s => s.type === 'home') || (layout.spots || [])[0];
 
 // Each model's size in the room (the editor's Size), 1 = as modelled.
@@ -1643,8 +1655,9 @@ function select(obj) {
   if (obj) { gizmo.attach(obj); gizmo.getHelper().visible = true; } else { gizmo.detach(); gizmo.getHelper().visible = false; }
   const d = obj?.userData;
   $('selName').textContent = !d ? 'Nothing' : d.kind === 'roomPart' ? `Room: ${d.key}`
-    : d.kind === 'item' ? `Furniture: ${d.file}` : `Spot: ${spotOf(d.id)?.name || spotOf(d.id)?.type}`;
+    : d.kind === 'item' ? `Furniture: ${d.file}` : `Spot: ${spotOf(d.id) ? spotLabel(spotOf(d.id)) : ''}`;
   const isSpot = d?.kind === 'spot';
+  $('spotPick').value = isSpot ? d.id : '';
   $('spotProps').style.display = isSpot ? 'flex' : 'none';
   if (isSpot) {
     const s = spotOf(d.id);
@@ -1675,12 +1688,16 @@ renderer.domElement.addEventListener('pointerup', e => {
   const pointer = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(pointer, camera);
   const hits = raycaster.intersectObjects([spotsGroup, itemsGroup, roomGroup], true);
+  const under = [];
   for (const hit of hits) {
     let o = hit.object;
     while (o && !o.userData?.kind) o = o.parent;
-    if (o && o.visible) { select(o); return; }
+    if (o && o.visible && !under.includes(o)) under.push(o);
   }
-  select(null);
+  // Clicking what's already selected picks the next thing under the pointer, so
+  // overlapping spots can each be reached.
+  const at = under.indexOf(selected);
+  select(under.length ? under[(at + 1) % under.length] : null);
 });
 
 // Keep the layout in step as things are dragged.
@@ -1714,6 +1731,8 @@ function removeSelected() {
   } else if (d.kind === 'spot') {
     layout.spots = layout.spots.filter(s => s.id !== d.id);
     spotsGroup.remove(selected);
+    selected = null;
+    listSpots();
   }
   select(null);
 }
@@ -1754,12 +1773,14 @@ $('addSpot').onclick = () => {
   layout.spots = [...(layout.spots || []), spot];
   const marker = spotMarker(spot);
   spotsGroup.add(marker);
+  listSpots();
   select(marker);
   if (spot.type === 'home') placeCharacter();
 };
-$('spotName').oninput = e => { const s = spotOf(selected.userData.id); s.name = e.target.value; };
+$('spotName').oninput = e => { const s = spotOf(selected.userData.id); s.name = e.target.value; listSpots(); };
 $('spotType').onchange = e => {
   const s = spotOf(selected.userData.id); s.type = e.target.value;
+  listSpots();
   const color = SPOT_COLORS[s.type];
   selected.traverse(o => o.material?.color?.setHex(color));
   placeCharacter();
@@ -1767,6 +1788,8 @@ $('spotType').onchange = e => {
 $('spotAnim').onchange = e => {
   const s = spotOf(selected.userData.id);
   s.animation = e.target.value === '(automatic)' ? undefined : e.target.value;
+  listSpots();
+  $('selName').textContent = `Spot: ${spotLabel(s)}`;
   if (active?.sitSpotId === s.id) seatAt(active, s);   // already sitting there: show the new pose
 };
 $('sitHere').onclick = () => {
