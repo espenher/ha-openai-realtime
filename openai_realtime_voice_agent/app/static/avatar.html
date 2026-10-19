@@ -72,6 +72,8 @@
     <button data-mode="scale">Scale</button>
     <button id="removeBtn" class="danger">Hide / remove</button>
   </div>
+  <div id="itemProps" class="row" style="display:none" title="A prop that's only there while she's at one sit spot (a book propped up where she lies)">
+    Show <select id="itemWith"></select></div>
   <div id="spotProps" style="display:none; flex-direction:column; gap:6px">
     <div class="row"><input id="spotName" type="text" placeholder="Spot name"></div>
     <div class="row">
@@ -992,12 +994,38 @@ async function loadRoom() {
 
 async function addItemObject(item) {
   const g = await glbLoader.loadAsync(`files/${encodeURIComponent(item.file)}`);
+  if (BOOK_FILE.test(item.file)) {
+    // A book as furniture: open, the size of the one in her hands, centred on where
+    // it's placed (the model itself is metres across, around an off-centre origin).
+    openBook(g);
+    const box = new THREE.Box3(), v = new THREE.Vector3();
+    g.scene.traverse(o => {
+      if (o.isMesh) for (let i = 0; i < o.geometry.attributes.position.count; i++) box.expandByPoint(o.getVertexPosition(i, v).applyMatrix4(o.matrixWorld));
+    });
+    const scale = BOOK_WIDTH / (box.getSize(v).x || 1);
+    g.scene.scale.setScalar(scale);
+    g.scene.position.copy(box.getCenter(v)).multiplyScalar(-scale);
+  }
   const wrap = new THREE.Group();
   wrap.add(g.scene);
-  wrap.userData = { kind: 'item', id: item.id, file: item.file };
+  const center = new THREE.Vector3();   // what she looks at, if she reads it
+  wrap.userData = { kind: 'item', id: item.id, file: item.file, center };
   applyTransform(wrap, item);
   itemsGroup.add(wrap);
   return wrap;
+}
+// Furniture tied to a sit spot is only there while she's at it (always while editing,
+// to place it). A book among them is what she looks at, lying there.
+let spotItemAt = null;
+function updateSpotItems() {
+  spotItemAt = null;
+  for (const wrap of itemsGroup.children) {
+    const item = (layout.items || []).find(i => i.id === wrap.userData.id);
+    if (!item?.withSpot) continue;
+    const here = active?.away === 'sit' && !active.move && active.sitSpotId === item.withSpot;
+    wrap.visible = editing || here;
+    if (here && BOOK_FILE.test(item.file)) spotItemAt = wrap.localToWorld(wrap.userData.center.clone());
+  }
 }
 async function loadItems() {
   itemsGroup.clear();
@@ -1374,16 +1402,12 @@ const BOOK_WIDTH = 0.28;        // metres across the open book at Size 1
 const BOOK_HANDS_APART = 0.3;   // metres at Size 1: further apart than this, one hand holds it
 let book = null;
 const bookAt = new THREE.Vector3();
-async function loadBook() {
-  const file = files.find(f => BOOK_FILE.test(f));
-  if (!file) return;
-  const g = await glbLoader.loadAsync(`files/${encodeURIComponent(file)}`);
+// The book file's resting shape is a closed book; this opens it (in her hands, or
+// placed in the room as furniture).
+function openBook(g) {
   g.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
-  const root = new THREE.Group();
-  root.add(g.scene);
-  root.visible = false;
-  scene.add(root);
   // Its animation opens it and turns a page; it's kept still, open, at the moment the
+
   // turning page sticks out least toward the reader. Its resting shape is a closed book.
   const mixer = new THREE.AnimationMixer(g.scene);
   for (const clip of g.animations) mixer.clipAction(clip).play();
@@ -1408,6 +1432,16 @@ async function loadBook() {
   // bones, so fold it away to nothing and keep just the open book.
   const page = g.scene.getObjectByName('Book_Page_001');
   if (page) { page.scale.setScalar(1e-4); g.scene.updateMatrixWorld(true); }
+}
+async function loadBook() {
+  const file = files.find(f => BOOK_FILE.test(f));
+  if (!file) return;
+  const g = await glbLoader.loadAsync(`files/${encodeURIComponent(file)}`);
+  const root = new THREE.Group();
+  root.add(g.scene);
+  root.visible = false;
+  scene.add(root);
+  openBook(g);
   // Measured open like that: wide along x, tall along y, its pages facing -z. The covers
   // aren't flat but a shallow V, so keep where the back cover is across the width (in
   // each slice, its furthest point from the pages, measured toward them).
@@ -1971,6 +2005,15 @@ function select(obj) {
   $('selName').textContent = !d ? 'Nothing' : d.kind === 'roomPart' ? `Room: ${d.key}`
     : d.kind === 'item' ? `Furniture: ${d.file}` : `Spot: ${spotOf(d.id) ? spotLabel(spotOf(d.id)) : ''}`;
   const isSpot = d?.kind === 'spot';
+  $('itemProps').style.display = d?.kind === 'item' ? '' : 'none';
+  if (d?.kind === 'item') {
+    const pick = $('itemWith'), item = (layout.items || []).find(i => i.id === d.id);
+    pick.innerHTML = '';
+    pick.append(Object.assign(document.createElement('option'), { value: '', textContent: 'always' }));
+    for (const spot of sitSpots())
+      pick.append(Object.assign(document.createElement('option'), { value: spot.id, textContent: `only while she's at: ${spotLabel(spot)}` }));
+    pick.value = item?.withSpot || '';
+  }
   $('spotPick').value = isSpot ? d.id : '';
   $('spotProps').style.display = isSpot ? 'flex' : 'none';
   if (isSpot) {
@@ -1987,6 +2030,11 @@ function select(obj) {
   }
 }
 const spotOf = id => (layout.spots || []).find(s => s.id === id);
+$('itemWith').onchange = e => {
+  const item = (layout.items || []).find(i => i.id === selected?.userData.id);
+  if (!item) return;
+  if (e.target.value) item.withSpot = e.target.value; else delete item.withSpot;
+};
 
 function setMode(mode) {
   gizmo.setMode(mode);
@@ -2332,6 +2380,7 @@ function updateGaze(dt, now) {
   gazeWant.copy(gazeOffset).multiplyScalar(dist).applyQuaternion(camera.quaternion).add(camera.position);
   if (active && active.away === 'sit' && lastPhase === 'idle') {
     if (book?.root.visible) gazeWant.copy(bookAt);
+    else if (spotItemAt) gazeWant.copy(spotItemAt);
     else gazeWant.set(0, 0.35, 1.2).multiplyScalar(active.root.scale.y)
       .applyAxisAngle(new THREE.Vector3(0, 1, 0), active.root.rotation.y).add(active.root.position);
   }
@@ -2409,6 +2458,7 @@ renderer.setAnimationLoop(() => {
 
   roomMixer?.update(dt);
   if (editing) orbit.update(); else updateDirector(dt, now);
+  updateSpotItems();
   updateGaze(dt, now);
   for (const ch of characters.values()) {
     if (!ch.root.visible) continue;
