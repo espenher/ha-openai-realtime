@@ -1274,7 +1274,7 @@ async function loadBook() {
     back[k] = lo === undefined ? back[hi] : hi === undefined ? back[lo]
       : back[lo] + (back[hi] - back[lo]) * (k - lo) / (hi - lo);
   }
-  book = { root, width: size.x || 1, height: size.y || 1, top: box.max.y, bottom: box.min.y, back, slice,
+  book = { root, width: size.x || 1, height: size.y || 1, top: box.max.y, bottom: box.min.y, cover: box.max.z, back, slice,
            inHand: new Map() };   // character file + animation -> [hand bone, the book's matrix in it]
 }
 const palmOf = (h, side) => {
@@ -1329,7 +1329,9 @@ function bookInPose(ch) {
     if (tall.y < 0) tall.negate();
     const at = hold.clone().addScaledVector(tall, -book.bottom * scale + 0.01 * size);
     hideFingers(at, pages, tall, ['left', 'right']);
-    return { hand: 'left', matrix: pose(pages, tall, at) };
+    // Kept with her upper body; her hands are then brought to it (holdBook).
+    const chest = h.getNormalizedBoneNode('upperChest') ? 'upperChest' : 'chest';
+    return { bone: chest, both: true, matrix: pose(pages, tall, at) };
   }
 
   // One hand, the raised one: the bottom edge of the book sits in her palm, the book
@@ -1346,7 +1348,7 @@ function bookInPose(ch) {
   const cover = book.back[book.slice(0)];
   at.addScaledVector(pages, hold.clone().sub(at).dot(pages) - (Number.isFinite(cover) ? cover * scale : 0) + 0.01 * size);
   hideFingers(at, pages, tall, [side]);
-  return { hand: side, matrix: pose(pages, tall, at) };
+  return { bone: `${side}Hand`, both: false, matrix: pose(pages, tall, at) };
 }
 // Play the animation on its own for a moment where her hands are as they usually are
 // (their usual distance apart), place the book, and keep it relative to the holding hand.
@@ -1370,8 +1372,8 @@ function bookInHand(ch, name) {
   const [when] = apart.reduce((best, a) => Math.abs(a[1] - usual) < Math.abs(best[1] - usual) ? a : best);
   poseAt(when);
   const there = bookInPose(ch);
-  const bone = there && h.getNormalizedBoneNode(`${there.hand}Hand`);
-  const held = bone ? [bone, new THREE.Matrix4().copy(bone.matrixWorld).invert().multiply(there.matrix)] : null;
+  const bone = there && h.getNormalizedBoneNode(there.bone);
+  const held = bone ? [bone, new THREE.Matrix4().copy(bone.matrixWorld).invert().multiply(there.matrix), there.both] : null;
   mixer.stopAllAction();
   mixer.uncacheRoot(ch.vrm.scene);
   for (const [o, position, quaternion, scale] of saved) { o.position.copy(position); o.quaternion.copy(quaternion); o.scale.copy(scale); }
@@ -1385,12 +1387,67 @@ function updateBook(ch) {
   const held = reading && ch.root.visible ? bookInHand(ch, ch.current) : null;
   book.root.visible = !!held;
   if (!held) return;
-  const [bone, inHand] = held;
+  const [bone, inHand, both] = held;
   bone.updateWorldMatrix(true, false);
   new THREE.Matrix4().multiplyMatrices(bone.matrixWorld, inHand)
     .decompose(book.root.position, book.root.quaternion, book.root.scale);
   book.root.updateMatrix();
   bookAt.set(0, 0, -0.2 * book.width).applyMatrix4(book.root.matrix);
+  if (both) holdBook(ch, reading.getEffectiveWeight());
+}
+
+// Held in both hands, the animation's own hands don't fit a real book (they were made
+// for another avatar's), so each arm reaches for a grip near the book's bottom corners
+// instead: palm against the back cover, fingers up behind the book, only the tips of
+// them showing round the edge. Two-bone IK on the arm as for the legs (reachWith),
+// blended in with the reading animation.
+const GRIP_ACROSS = 0.3;    // of the book's width from its middle
+const GRIP_UP = -0.02;      // of its height from its bottom edge (the palm just under it)
+function holdBook(ch, weight) {
+  if (weight <= 0.01) return;
+  const h = ch.vrm.humanoid, size = ch.root.scale.y;
+  const m = book.root.matrix, scale = book.root.scale.x;
+  const right = new THREE.Vector3().setFromMatrixColumn(m, 0).normalize();
+  const up = new THREE.Vector3().setFromMatrixColumn(m, 1).normalize();
+  const back = new THREE.Vector3().setFromMatrixColumn(m, 2).normalize();   // away from the pages
+  const middle = book.root.position.clone();
+  for (const side of ['left', 'right']) {
+    const leg = { upper: h.getNormalizedBoneNode(`${side}UpperArm`), lower: h.getNormalizedBoneNode(`${side}LowerArm`),
+                  foot: h.getNormalizedBoneNode(`${side}Hand`) };
+    const knuckle = h.getNormalizedBoneNode(`${side}MiddleProximal`);
+    if (!leg.upper || !leg.lower || !leg.foot || !knuckle) continue;
+    leg.foot.updateWorldMatrix(true, true);
+    const wrist = leg.foot.getWorldPosition(new THREE.Vector3());
+    // Her own side of the book: the corner nearer where the animation has this hand.
+    const toward = Math.sign(wrist.clone().sub(middle).dot(right)) || (side === 'left' ? -1 : 1);
+    const grip = middle.clone()
+      .addScaledVector(right, toward * GRIP_ACROSS * book.width * scale)
+      .addScaledVector(up, (book.bottom + GRIP_UP * book.height) * scale)
+      .addScaledVector(back, book.cover * scale + 0.012 * size);
+    // Fingers up behind the book, leaning a little toward its middle; palm toward the pages.
+    const fingers = up.clone().addScaledVector(right, -toward * 0.35).normalize();
+    const palm = back.clone().negate();
+    palm.addScaledVector(fingers, -palm.dot(fingers)).normalize();
+    const palmLength = knuckle.getWorldPosition(new THREE.Vector3()).distanceTo(wrist);
+    const target = grip.addScaledVector(fingers, -0.6 * palmLength);
+    // The hand bone's own axes: fingers along its knuckle offset, and the palm, which
+    // faces the other way from the back of the hand, worked out from the thumb (it sits
+    // on the palm side of the knuckles) rather than trusted to the rest pose.
+    const fingersLocal = knuckle.position.clone().normalize();
+    const thumb = h.getNormalizedBoneNode(`${side}ThumbMetacarpal`) || h.getNormalizedBoneNode(`${side}ThumbProximal`);
+    const palmLocal = new THREE.Vector3(0, -1, 0);
+    if (thumb) {
+      const t = thumb.position.clone().addScaledVector(fingersLocal, -thumb.position.dot(fingersLocal));
+      if (t.y > 0) palmLocal.set(0, 1, 0);
+    }
+    palmLocal.addScaledVector(fingersLocal, -palmLocal.dot(fingersLocal)).normalize();
+    const local = new THREE.Matrix4().makeBasis(fingersLocal, palmLocal, new THREE.Vector3().crossVectors(fingersLocal, palmLocal));
+    const world = new THREE.Matrix4().makeBasis(fingers, palm, new THREE.Vector3().crossVectors(fingers, palm));
+    const turn = new THREE.Quaternion().setFromRotationMatrix(world.multiply(local.transpose()));
+    const fkTurn = leg.foot.getWorldQuaternion(new THREE.Quaternion());
+    reachWith(leg, wrist.lerp(target, weight), new THREE.Vector3(0, 1, 0));
+    turnTo(leg.foot, fkTurn.slerp(turn, weight));
+  }
 }
 
 // A gesture can ask for its own framing (full body by default) while it plays.
@@ -1914,8 +1971,8 @@ renderer.setAnimationLoop(() => {
       if (blinkT > 0.15) { blinkT = -1; em?.setValue('blink', 0); }
     }
     updateMood(ch, dt, now);
-    ch.vrm.update(dt);
     updateBook(ch);
+    ch.vrm.update(dt);
   }
   if (debugOn) {
     debugEl.style.display = 'block';
