@@ -1411,6 +1411,11 @@ function holdBook(ch, weight) {
   const up = new THREE.Vector3().setFromMatrixColumn(m, 1).normalize();
   const back = new THREE.Vector3().setFromMatrixColumn(m, 2).normalize();   // away from the pages
   const middle = book.root.position.clone();
+  // Which corner is whose comes from her shoulders: her hands cross over each other now
+  // and then (the right one turning a page), her shoulders never do.
+  const shoulder = side => h.getNormalizedBoneNode(`${side}UpperArm`)?.getWorldPosition(new THREE.Vector3());
+  const ls = shoulder('left'), rs = shoulder('right');
+  const leftward = ls && rs ? Math.sign(ls.sub(rs).dot(right)) || -1 : -1;
   for (const side of ['left', 'right']) {
     const leg = { upper: h.getNormalizedBoneNode(`${side}UpperArm`), lower: h.getNormalizedBoneNode(`${side}LowerArm`),
                   foot: h.getNormalizedBoneNode(`${side}Hand`) };
@@ -1418,8 +1423,7 @@ function holdBook(ch, weight) {
     if (!leg.upper || !leg.lower || !leg.foot || !knuckle) continue;
     leg.foot.updateWorldMatrix(true, true);
     const wrist = leg.foot.getWorldPosition(new THREE.Vector3());
-    // Her own side of the book: the corner nearer where the animation has this hand.
-    const toward = Math.sign(wrist.clone().sub(middle).dot(right)) || (side === 'left' ? -1 : 1);
+    const toward = side === 'left' ? leftward : -leftward;
     const grip = middle.clone()
       .addScaledVector(right, toward * GRIP_ACROSS * book.width * scale)
       .addScaledVector(up, (book.bottom + GRIP_UP * book.height) * scale)
@@ -1447,6 +1451,11 @@ function holdBook(ch, weight) {
     const fkTurn = leg.foot.getWorldQuaternion(new THREE.Quaternion());
     reachWith(leg, wrist.lerp(target, weight), new THREE.Vector3(0, 1, 0));
     turnTo(leg.foot, fkTurn.slerp(turn, weight));
+    // Fingers nearly straight along the back cover: the animation's curl would bend them
+    // through the book.
+    for (const f of ['Index', 'Middle', 'Ring', 'Little']) for (const j of ['Proximal', 'Intermediate', 'Distal']) {
+      h.getNormalizedBoneNode(`${side}${f}${j}`)?.quaternion.slerp(new THREE.Quaternion(), 0.85 * weight);
+    }
   }
 }
 
