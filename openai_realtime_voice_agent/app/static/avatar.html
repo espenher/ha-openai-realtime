@@ -84,6 +84,11 @@
       </select>
     </div>
     <div class="row"><select id="spotAnim"></select><button id="sitHere" title="Put her in this spot's pose now, to fine-tune it">Sit here</button></div>
+    <div class="row" id="spotUseRow">Use for <select id="spotUse">
+      <option value="both">asked to sit, and idle</option>
+      <option value="asked">when asked to sit</option>
+      <option value="idle">idle (by herself)</option>
+    </select></div>
     <div class="row" id="spotLeanRow" title="Tilts her back (or forward, below 0) around her hips while she sits here">
       Lean back <input id="spotLean" type="number" class="w" step="1" min="-60" max="60" value="0"> °</div>
   </div>
@@ -96,6 +101,10 @@
   <textarea id="charRoom" placeholder="Her room: what's in it, what it feels like…"></textarea>
   <div class="row">Size <input id="charSize" type="number" step="0.02" min="0.3" max="2" value="1"></div>
   <div class="row" title="What she dances when asked to (until she's asked to stop)">Dance <select id="charDance"></select></div>
+  <div class="row" title="Quiet seconds before she goes to an idle sit spot by herself">Idle after
+    <input id="charIdleAfter" type="number" class="w" min="10" step="10"> s</div>
+  <div class="row" title="While idle she moves to another idle sit spot this often (at random in between)">Change spot every
+    <input id="charIdleMin" type="number" class="w" min="0.5" step="0.5">–<input id="charIdleMax" type="number" class="w" min="0.5" step="0.5"> min</div>
   <h2>Moods &amp; gestures</h2>
   <p>Tags she can put in her replies. Moods set her face, gestures play an animation once. The note tells her when
      to use it. Saved with the room; she knows about changes right away.</p>
@@ -703,6 +712,12 @@ function buildActionsUI() {
 }
 $('charLooks').onchange = () => { (layout.character ??= {}).appearance = $('charLooks').value.trim(); };
 $('charRoom').onchange = () => { (layout.character ??= {}).room = $('charRoom').value.trim(); };
+for (const id of ['charIdleAfter', 'charIdleMin', 'charIdleMax']) $(id).onchange = () => {
+  const c = layout.character ??= {};
+  c.idleAfter = Math.max(10, Number($('charIdleAfter').value) || IDLE_AFTER_S);
+  const lo = Math.max(0.5, Number($('charIdleMin').value) || IDLE_CHANGE_MIN[0]);
+  c.idleChange = [lo, Math.max(lo, Number($('charIdleMax').value) || IDLE_CHANGE_MIN[1])];
+};
 $('charDance').onchange = () => {
   const value = $('charDance').value;
   if (value === '(automatic)') delete (layout.character ??= {}).dance; else (layout.character ??= {}).dance = value;
@@ -933,7 +948,7 @@ function loadSpots() {
   listSpots();
 }
 // The spots by name (or type and animation), to pick one that's hard to click.
-const spotLabel = s => s.name || `${s.type}${s.type === 'sit' ? `: ${s.animation || 'automatic'}` : ''}`;
+const spotLabel = s => s.name || `${s.type}${s.type === 'sit' ? `: ${s.animation || 'automatic'}${s.use ? ` (${s.use})` : ''}` : ''}`;
 function listSpots() {
   const pick = $('spotPick');
   pick.innerHTML = '';
@@ -1070,18 +1085,27 @@ function updateDirector(dt, now) {
 // goes after a quiet spell or when she says [sit down]; [stand up] brings her
 // back. Seated she still talks, but without talking animations or gestures.
 // There can be several sit spots, each with its own animation and placement (a
-// spot per way of sitting, fine-tuned in the editor with "Sit here"): she picks one
-// at random, and while she sits quietly she moves to another every 2-3 minutes.
-const IDLE_TO_SIT_S = 90;     // quiet seconds before she goes and sits
+// spot per way of sitting, fine-tuned in the editor with "Sit here"), each used when
+// she's asked to sit, when she's idle, or both. Asked, she goes to one for that and
+// stays. Left quiet for a while (Idle after, under Character) she goes to an idle one
+// by herself (from the asked one too), and moves on to another idle one every few
+// minutes (Change spot every); spoken to, she stays put and looks up.
+const IDLE_AFTER_S = 90;          // defaults for the editor's Character settings
+const IDLE_CHANGE_MIN = [2, 4];
+const idleAfter = () => layout.character?.idleAfter ?? IDLE_AFTER_S;
+const idleChange = () => layout.character?.idleChange ?? IDLE_CHANGE_MIN;
 const WALK_SPEED = 0.7;       // metres per second at Size 1 (without a walk animation to measure)
 const TURN_SPEED = 3.5;       // radians per second
 const SIT_WORDS = new Set(['sit down', 'sit', 'go sit', 'take a seat', 'sit in your chair']);
 const STAND_WORDS = new Set(['stand up', 'get up', 'stand']);
-const SEAT_CHANGE_S = [120, 180];   // seconds between changing how she sits, at random
 const sitSpots = () => (layout.spots || []).filter(s => s.type === 'sit');
-// Another sit spot than the one she's in, at random (that one if it's the only one).
-function pickSitSpot(ch) {
-  const all = sitSpots(), others = all.filter(s => s.id !== ch.sitSpotId);
+const isIdleSpot = s => (s.use || 'both') !== 'asked';
+// A sit spot for being asked to sit or for idling ('asked' / 'idle'): another than the
+// one she's in, at random (that one if it's the only one; any sit spot if none is
+// meant for it).
+function pickSitSpot(ch, use = 'asked') {
+  const meant = sitSpots().filter(s => (s.use || 'both') === use || (s.use || 'both') === 'both');
+  const all = meant.length ? meant : sitSpots(), others = all.filter(s => s.id !== ch.sitSpotId);
   const from = others.length ? others : all;
   return from[Math.floor(Math.random() * from.length)];
 }
@@ -1125,7 +1149,7 @@ const angleTo = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from
 function activityTag(ch, tag) {
   if (DANCE_WORDS.has(tag)) { goDance(ch); return true; }
   if (STOP_DANCE_WORDS.has(tag)) { stopDance(ch); return true; }
-  if (SIT_WORDS.has(tag)) { goSit(ch); return true; }
+  if (SIT_WORDS.has(tag)) { goSit(ch, pickSitSpot(ch, 'asked'), false); return true; }
   if (STAND_WORDS.has(tag)) { goHome(ch); return true; }
   return false;
 }
@@ -1142,8 +1166,10 @@ function walkTo(ch, spot, arrive) {
   ch.move.speed = (walk && ch.travelSpeeds?.get(walk)) || WALK_SPEED;
   play(ch, walk || find(ch, /idle/i), 0.4);
 }
-function goSit(ch, spot = pickSitSpot(ch)) {
-  if (!spot || ch.move || (ch.away === 'sit' && spot.id === ch.sitSpotId)) return;
+function goSit(ch, spot = pickSitSpot(ch), idle = isIdleSpot(spot || {})) {
+  if (!spot || ch.move) return;
+  ch.sitIdle = idle;
+  if (ch.away === 'sit' && spot.id === ch.sitSpotId) return;
   if (ch.away === 'sit') {   // up from where she sits first
     ch.seat = null;
     ch.liftTo = homeSpot()?.position?.[1] ?? 0;
@@ -1165,7 +1191,8 @@ function sitAt(ch, spot) {
   if (!anim) { ch.away = 'standing'; return; }
   ch.away = 'sit';
   ch.sitSpotId = spot.id;
-  ch.nextSeatChange = performance.now() / 1000 + SEAT_CHANGE_S[0] + Math.random() * (SEAT_CHANGE_S[1] - SEAT_CHANGE_S[0]);
+  const [lo, hi] = idleChange();
+  ch.nextSeatChange = performance.now() / 1000 + 60 * (lo + Math.random() * (hi - lo));
   play(ch, anim, 0.5);
   // The marker's height is the seat's; left on the floor, assume an ordinary chair.
   const y = spot.position?.[1] ?? 0;
@@ -1199,7 +1226,7 @@ function followActivity(ch, value, justOpened, spotId) {
   if (value === 'sitting') {
     const spot = sitSpots().find(s => s.id === spotId) || pickSitSpot(ch);
     if (!spot) return;
-    if (justOpened) seatAt(ch, spot); else goSit(ch, spot);
+    if (justOpened) { ch.sitIdle = spot.use === 'idle'; seatAt(ch, spot); } else goSit(ch, spot, spot.use === 'idle');
   }
   else if (value === 'dancing') goDance(ch);
   else goHome(ch);
@@ -1240,13 +1267,14 @@ function updateActivity(ch, dt, now) {
     }
     return;
   }
-  // A quiet spell sends her to the chair (the second persona only).
-  if (!ch.away && !editing && lastPhase === 'idle' && now - quietSince > IDLE_TO_SIT_S
-      && normTag(activePersona) === normTag(tagPersona) && ch === active) goSit(ch);
-  // Sitting quietly, she changes how she sits now and then (another sit spot). Not
-  // mid-conversation: a talk pushes it back a little.
-  if (ch.away === 'sit' && !editing && ch === active && sitSpots().length > 1 && now > (ch.nextSeatChange ?? Infinity)) {
-    if (lastPhase === 'idle' && now - quietSince > 20) goSit(ch);
+  // A quiet spell sends her to an idle sit spot (the second persona only), also from
+  // one she was asked to sit in.
+  const quiet = !editing && lastPhase === 'idle' && now - quietSince > idleAfter() && isTagPersona(ch);
+  if (quiet && (!ch.away || (ch.away === 'sit' && !ch.sitIdle))) goSit(ch, pickSitSpot(ch, 'idle'), true);
+  // Idling, she moves on to another idle spot now and then. Not mid-conversation: a
+  // talk pushes it back a little.
+  if (ch.away === 'sit' && ch.sitIdle && !editing && ch === active && now > (ch.nextSeatChange ?? Infinity)) {
+    if (lastPhase === 'idle' && now - quietSince > 20) goSit(ch, pickSitSpot(ch, 'idle'), true);
     else ch.nextSeatChange = now + 30;
   }
 }
@@ -1660,6 +1688,8 @@ function setEditing(on) {
     $('charRoom').value = layout.character?.room || '';
     $('charSize').value = active ? characterScale(active) : 1;
     fillSelect($('charDance'), ['(automatic)', ...(active ? active.actions.keys() : [])], layout.character?.dance || '(automatic)');
+    $('charIdleAfter').value = idleAfter();
+    [$('charIdleMin').value, $('charIdleMax').value] = idleChange();
   } else {
     select(null);
     applyViewCamera();
@@ -1684,6 +1714,8 @@ function select(obj) {
     fillSelect($('spotAnim'), ['(automatic)', ...animationNames], s.animation || '(automatic)');
     $('sitHere').style.display = s.type === 'sit' ? '' : 'none';
     $('spotLeanRow').style.display = s.type === 'sit' ? '' : 'none';
+    $('spotUseRow').style.display = s.type === 'sit' ? '' : 'none';
+    $('spotUse').value = s.use || 'both';
     $('spotLean').value = s.lean || 0;
     setMode('translate');
   }
@@ -1811,6 +1843,11 @@ $('spotAnim').onchange = e => {
   listSpots();
   $('selName').textContent = `Spot: ${spotLabel(s)}`;
   if (active?.sitSpotId === s.id) seatAt(active, s);   // already sitting there: show the new pose
+};
+$('spotUse').onchange = e => {
+  const s = spotOf(selected.userData.id);
+  if (e.target.value === 'both') delete s.use; else s.use = e.target.value;
+  listSpots();
 };
 $('spotLean').oninput = e => {
   const s = spotOf(selected.userData.id);
