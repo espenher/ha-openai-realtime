@@ -1809,28 +1809,41 @@ function drapeSkirt(ch, dt) {
 
 // Seated, her thighs (fuller than the ones the sitting animations were made on) press
 // into each other; each one is turned out a little at the hip, knees apart.
+// Walking, each foot is kept a little way from her middle: a walk made on another body
+// can put every step across the line (the VRChat one landed each foot 3-4 cm past it),
+// and from the front her legs scissored through each other. Only as much as a step
+// needs, and the foot turned back so the sole stays flat.
 const SEATED_KNEE_SPREAD = THREE.MathUtils.degToRad(7);
+const WALK_FOOT_GAP = 0.06;   // least distance from her middle to the middle of each foot
 function spreadKnees(ch, dt) {
   const h = ch.vrm.humanoid;
   const hips = h.getNormalizedBoneNode('hips');
   const L = h.getNormalizedBoneNode('leftUpperLeg'), R = h.getNormalizedBoneNode('rightUpperLeg');
-  fromAnimation(L);
-  fromAnimation(R);
+  const LF = h.getNormalizedBoneNode('leftFoot'), RF = h.getNormalizedBoneNode('rightFoot');
+  for (const node of [L, R, LF, RF]) fromAnimation(node);
   ch.kneeSpread = (ch.kneeSpread ?? 0) + ((ch.away === 'sit' ? 1 : 0) - (ch.kneeSpread ?? 0)) * Math.min(1, dt * 3);
-  if (ch.kneeSpread < 0.01 || !hips || !L || !R) return;
+  ch.walkGap = (ch.walkGap ?? 0) + ((ch.move ? 1 : 0) - (ch.walkGap ?? 0)) * Math.min(1, dt * 4);
+  if ((ch.kneeSpread < 0.01 && ch.walkGap < 0.01) || !hips || !L || !R) return;
   hips.updateWorldMatrix(true, true);
   const at = n => n.getWorldPosition(new THREE.Vector3());
   const outward = at(L).sub(at(R)).normalize();   // toward her left
-  for (const [thigh, knee, out] of [[L, h.getNormalizedBoneNode('leftLowerLeg'), outward],
-                                    [R, h.getNormalizedBoneNode('rightLowerLeg'), outward.clone().negate()]]) {
+  const middle = at(L).add(at(R)).multiplyScalar(0.5);
+  for (const [thigh, knee, foot, out] of [[L, h.getNormalizedBoneNode('leftLowerLeg'), LF, outward],
+                                          [R, h.getNormalizedBoneNode('rightLowerLeg'), RF, outward.clone().negate()]]) {
     if (!knee) continue;
     const along = at(knee).sub(at(thigh)).normalize();
     const axis = new THREE.Vector3().crossVectors(along, out);
     if (axis.lengthSq() < 1e-8) continue;
-    turnBy(thigh, new THREE.Quaternion().setFromAxisAngle(axis.normalize(), SEATED_KNEE_SPREAD * ch.kneeSpread));
+    axis.normalize();
+    let walk = 0;
+    if (ch.walkGap >= 0.01 && foot) {
+      const off = at(foot).sub(middle).dot(out);
+      walk = ch.walkGap * Math.atan2(Math.max(0, WALK_FOOT_GAP - off), at(foot).distanceTo(at(thigh)));
+    }
+    turnBy(thigh, new THREE.Quaternion().setFromAxisAngle(axis, SEATED_KNEE_SPREAD * ch.kneeSpread + walk));
+    if (walk && foot) turnBy(foot, new THREE.Quaternion().setFromAxisAngle(axis, -walk));
   }
-  layered(L);
-  layered(R);
+  for (const node of [L, R, LF, RF]) layered(node);
 }
 
 function updateHeadTurn(ch, dt) {
