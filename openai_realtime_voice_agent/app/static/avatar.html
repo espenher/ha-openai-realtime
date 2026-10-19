@@ -82,7 +82,7 @@
         <option value="dance">dance</option>
       </select>
     </div>
-    <div class="row"><select id="spotAnim"></select></div>
+    <div class="row"><select id="spotAnim"></select><button id="sitHere" title="Put her in this spot's pose now, to fine-tune it">Sit here</button></div>
   </div>
 
   <h2>Animation</h2>
@@ -1052,12 +1052,22 @@ function updateDirector(dt, now) {
 // floor it assumes an ordinary chair height). She
 // goes after a quiet spell or when she says [sit down]; [stand up] brings her
 // back. Seated she still talks, but without talking animations or gestures.
+// There can be several sit spots, each with its own animation and placement (a
+// spot per way of sitting, fine-tuned in the editor with "Sit here"): she picks one
+// at random, and while she sits quietly she moves to another every 2-3 minutes.
 const IDLE_TO_SIT_S = 90;     // quiet seconds before she goes and sits
 const WALK_SPEED = 0.7;       // metres per second at Size 1 (without a walk animation to measure)
 const TURN_SPEED = 3.5;       // radians per second
 const SIT_WORDS = new Set(['sit down', 'sit', 'go sit', 'take a seat', 'sit in your chair']);
 const STAND_WORDS = new Set(['stand up', 'get up', 'stand']);
-const sitSpot = () => (layout.spots || []).find(s => s.type === 'sit');
+const SEAT_CHANGE_S = [120, 180];   // seconds between changing how she sits, at random
+const sitSpots = () => (layout.spots || []).filter(s => s.type === 'sit');
+// Another sit spot than the one she's in, at random (that one if it's the only one).
+function pickSitSpot(ch) {
+  const all = sitSpots(), others = all.filter(s => s.id !== ch.sitSpotId);
+  const from = others.length ? others : all;
+  return from[Math.floor(Math.random() * from.length)];
+}
 // Dancing: [start dancing] and she dances on her spot (getting up from the chair
 // first), over and over and while she talks, until [stop dancing] (or [stand up]).
 // Her dance is the one picked under Character in the editor, else the first
@@ -1115,15 +1125,29 @@ function walkTo(ch, spot, arrive) {
   ch.move.speed = (walk && ch.travelSpeeds?.get(walk)) || WALK_SPEED;
   play(ch, walk || find(ch, /idle/i), 0.4);
 }
-function goSit(ch) {
-  const spot = sitSpot();
-  if (!spot || ch.away === 'sit' || ch.move) return;
+function goSit(ch, spot = pickSitSpot(ch)) {
+  if (!spot || ch.move || (ch.away === 'sit' && spot.id === ch.sitSpotId)) return;
+  if (ch.away === 'sit') {   // up from where she sits first
+    ch.seat = null;
+    ch.liftTo = homeSpot()?.position?.[1] ?? 0;
+    ch.away = null;
+  }
   walkTo(ch, spot, () => sitAt(ch, spot));
+}
+// Straight into a spot's pose, no walking (a page just opened, or "Sit here").
+function seatAt(ch, spot) {
+  ch.move = null;
+  ch.root.position.fromArray(spot.position || [0, 0, 0]);
+  ch.root.rotation.y = spot.rotationY || 0;
+  if (ch.current) ch.current = null;   // replay even if it's the same animation
+  sitAt(ch, spot);
 }
 function sitAt(ch, spot) {
   const anim = sitAnimation(ch, spot);
   if (!anim) { ch.away = 'standing'; return; }
   ch.away = 'sit';
+  ch.sitSpotId = spot.id;
+  ch.nextSeatChange = performance.now() / 1000 + SEAT_CHANGE_S[0] + Math.random() * (SEAT_CHANGE_S[1] - SEAT_CHANGE_S[0]);
   play(ch, anim, 0.5);
   // The marker's height is the seat's; left on the floor, assume an ordinary chair.
   const y = spot.position?.[1] ?? 0;
@@ -1136,6 +1160,7 @@ function goHome(ch) {
   ch.seat = null;
   ch.liftTo = spot.position?.[1] ?? 0;   // back down to the floor as she gets up
   ch.away = null;
+  ch.sitSpotId = null;
   walkTo(ch, spot, () => {
     play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.5);
     reportActivity(ch);
@@ -1148,17 +1173,15 @@ const activityOf = ch => ch.away === 'sit' ? 'sitting' : ch.away === 'dance' ? '
 const isTagPersona = ch => ch === active && normTag(activePersona) === normTag(tagPersona);
 function reportActivity(ch) {
   if (isTagPersona(ch) && socket?.readyState === WebSocket.OPEN)
-    socket.send(JSON.stringify({ type: 'activity', value: activityOf(ch) }));
+    socket.send(JSON.stringify({ type: 'activity', value: activityOf(ch), spot: ch.away === 'sit' ? ch.sitSpotId : null }));
 }
-function followActivity(ch, value, justOpened) {
-  if (!isTagPersona(ch) || ch.move || value === activityOf(ch)) return;
+function followActivity(ch, value, justOpened, spotId) {
+  if (!isTagPersona(ch) || ch.move) return;
+  if (value === activityOf(ch) && (value !== 'sitting' || !spotId || spotId === ch.sitSpotId)) return;
   if (value === 'sitting') {
-    const spot = sitSpot();
+    const spot = sitSpots().find(s => s.id === spotId) || pickSitSpot(ch);
     if (!spot) return;
-    if (!justOpened) { goSit(ch); return; }
-    ch.root.position.fromArray(spot.position || [0, 0, 0]);
-    ch.root.rotation.y = spot.rotationY || 0;
-    sitAt(ch, spot);
+    if (justOpened) seatAt(ch, spot); else goSit(ch, spot);
   }
   else if (value === 'dancing') goDance(ch);
   else goHome(ch);
@@ -1202,6 +1225,12 @@ function updateActivity(ch, dt, now) {
   // A quiet spell sends her to the chair (the second persona only).
   if (!ch.away && !editing && lastPhase === 'idle' && now - quietSince > IDLE_TO_SIT_S
       && normTag(activePersona) === normTag(tagPersona) && ch === active) goSit(ch);
+  // Sitting quietly, she changes how she sits now and then (another sit spot). Not
+  // mid-conversation: a talk pushes it back a little.
+  if (ch.away === 'sit' && !editing && ch === active && sitSpots().length > 1 && now > (ch.nextSeatChange ?? Infinity)) {
+    if (lastPhase === 'idle' && now - quietSince > 20) goSit(ch);
+    else ch.nextSeatChange = now + 30;
+  }
 }
 
 // ---------- reading book ----------
@@ -1618,6 +1647,7 @@ function select(obj) {
     $('spotName').value = s.name || '';
     $('spotType').value = s.type;
     fillSelect($('spotAnim'), ['(automatic)', ...animationNames], s.animation || '(automatic)');
+    $('sitHere').style.display = s.type === 'sit' ? '' : 'none';
     setMode('translate');
   }
 }
@@ -1733,6 +1763,11 @@ $('spotType').onchange = e => {
 $('spotAnim').onchange = e => {
   const s = spotOf(selected.userData.id);
   s.animation = e.target.value === '(automatic)' ? undefined : e.target.value;
+  if (active?.sitSpotId === s.id) seatAt(active, s);   // already sitting there: show the new pose
+};
+$('sitHere').onclick = () => {
+  const s = selected && spotOf(selected.userData.id);
+  if (active && s?.type === 'sit') seatAt(active, s);
 };
 
 $('setWide').onclick = () => {
@@ -1962,11 +1997,11 @@ function onMessage(msg) {
       if (msg.persona) showPersona(msg.persona);
       setStatus(`${msg.persona || ''} connected`, true);
       // Just opened: start out as she is. Reconnected (the add-on restarted): tell it.
-      if (active && !connectedBefore && msg.activity) followActivity(active, msg.activity, true);
+      if (active && !connectedBefore && msg.activity) followActivity(active, msg.activity, true, msg.spot);
       else if (active) reportActivity(active);
       connectedBefore = true;
       break;
-    case 'activity': if (active) followActivity(active, msg.value, false); break;
+    case 'activity': if (active) followActivity(active, msg.value, false, msg.spot); break;
     case 'persona': showPersona(msg.value); break;
     case 'phase':
       if (msg.value === 'idle' && lastPhase !== 'idle') idleSince = now;

@@ -11,8 +11,9 @@ streams what the page needs to animate:
   {"type": "tag", "value": "<tag>"}                 a [tag] from the second persona's reply (mood or gesture)
   {"type": "env", "dt": 0.02, "values": [...]}       loudness of the reply audio,
                                                       one value per 20 ms, for lip-sync
-  {"type": "activity", "value": "standing" | "sitting" | "dancing"}
+  {"type": "activity", "value": "standing" | "sitting" | "dancing", "spot": ...}
                                                       what the second persona is doing
+                                                      (and which sit spot she's in)
 
 Pages send {"type": "activity", "value": ...} back when she gets there (she sits
 down by herself after a quiet spell too). The hub keeps the latest, passes it on
@@ -128,7 +129,7 @@ class AvatarHub:
 
     def __init__(self) -> None:
         self._clients: set[web.WebSocketResponse] = set()
-        self._state = {"phase": "idle", "persona": None, "activity": "standing"}
+        self._state = {"phase": "idle", "persona": None, "activity": "standing", "spot": None}
         # Set by the websocket handler: refreshes the live session's instructions
         # when the editor saves new moods/gestures, and when she sits, stands or dances.
         self.on_layout_saved = None
@@ -288,10 +289,11 @@ class AvatarHub:
         if not isinstance(msg, dict) or msg.get("type") != "activity":
             return
         value = msg.get("value")
-        if value not in ACTIVITIES or value == self._state["activity"]:
+        spot = msg.get("spot") if value == "sitting" and isinstance(msg.get("spot"), str) else None
+        if value not in ACTIVITIES or (value, spot) == (self._state["activity"], self._state["spot"]):
             return
-        logger.info(f"🧍 avatar is {value} now")
-        self.send({"type": "activity", "value": value})
+        logger.info(f"🧍 avatar is {value} now" + (f" ({spot})" if spot else ""))
+        self.send({"type": "activity", "value": value, "spot": spot})
         if self.on_activity:
             asyncio.create_task(self.on_activity())
 
@@ -303,6 +305,8 @@ class AvatarHub:
     def send(self, obj: dict) -> None:
         if obj.get("type") in ("phase", "persona", "activity"):
             self._state[obj["type"]] = obj.get("value")
+        if obj.get("type") == "activity":
+            self._state["spot"] = obj.get("spot")
         for ws in list(self._clients):
             if not ws.closed:
                 asyncio.create_task(self._safe_send(ws, obj))
