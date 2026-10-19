@@ -184,6 +184,7 @@ const setStatus = (text, fade = false) => { statusEl.textContent = text; statusE
 
 // ---------- scene ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.localClippingEnabled = true;   // walls in the way of the camera (updateWallClips)
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -992,6 +993,58 @@ async function loadRoom() {
     roomMixer = new THREE.AnimationMixer(g.scene);
     for (const clip of g.animations) roomMixer.clipAction(clip).play();
   }
+  setupWallClips();
+}
+
+// ---------- walls in the way ----------
+// Some shots end up behind a wall (the close-up of her lying on the sofa along one
+// swings out past it). Then the wall is seen through: everything of the room on the
+// camera's side of that wall's inner face is clipped away, for each wall in the way
+// (two at most, for a corner). Only the room's big surfaces count as walls, and only
+// upright faces, so a lamp or the floor never cuts the room open.
+const wallClips = [new THREE.Plane(), new THREE.Plane()];
+const WALL_CLEAR = new THREE.Plane(new THREE.Vector3(0, 1, 0), 1e6);   // clips nothing
+let wallMeshes = [];
+function setupWallClips() {
+  wallMeshes = [];
+  for (const plane of wallClips) plane.copy(WALL_CLEAR);
+  roomGroup.updateMatrixWorld(true);
+  const size = new THREE.Vector3();
+  roomGroup.traverse(o => {
+    if (!o.isMesh) return;
+    for (const m of [o.material].flat()) m.clippingPlanes = wallClips;
+    new THREE.Box3().setFromObject(o).getSize(size);
+    if (Math.max(size.x, size.z) > 1.5) wallMeshes.push(o);
+  });
+}
+const _wr = new THREE.Raycaster(), _wn = new THREE.Vector3(), _wt = new THREE.Vector3(), _wd = new THREE.Vector3();
+function updateWallClips() {
+  const found = [];
+  if (active?.root.visible && wallMeshes.length) {
+    const h = active.vrm.humanoid;
+    for (const bone of ['head', 'hips']) {
+      const node = h.getRawBoneNode(bone);
+      if (!node) continue;
+      node.getWorldPosition(_wt);
+      _wd.subVectors(_wt, camera.position);
+      const dist = _wd.length();
+      _wr.set(camera.position, _wd.normalize());
+      _wr.far = Math.max(0, dist - 0.05);
+      for (const hit of _wr.intersectObjects(wallMeshes, false)) {
+        if (!hit.face) continue;
+        _wn.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+        if (Math.abs(_wn.y) > 0.4) continue;                        // floor, ceiling, slopes
+        if (_wn.dot(_wt.clone().sub(hit.point)) < 0) _wn.negate();   // facing her
+        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(_wn, hit.point);
+        if (plane.distanceToPoint(_wt) < 0.2) continue;             // she's right against it
+        // Both faces of a thick wall come out alike: keep the one nearer her.
+        const same = found.find(f => f.normal.dot(plane.normal) > 0.95);
+        if (!same) found.push(plane);
+        else if (plane.distanceToPoint(_wt) < same.distanceToPoint(_wt)) same.copy(plane);
+      }
+    }
+  }
+  wallClips.forEach((plane, i) => plane.copy(found[i] ?? WALL_CLEAR));
 }
 
 async function addItemObject(item) {
@@ -1344,7 +1397,11 @@ function followActivity(ch, value, justOpened, spotId) {
 function updateActivity(ch, dt, now) {
   const root = ch.root;
   // Seated: once the pose has settled, lower her so her hips rest on the sit marker.
-  if (ch.seat && now > ch.seat.settleAt && ch.seat.offset === undefined) {
+  // Measured once the pose has fully blended in, not just after a while: a page opened
+  // with her already sitting keeps her hidden (not animating) while it loads, and she
+  // was measured standing and sunk through the seat.
+  const seated = ch.current && ch.actions.get(ch.current)?.getEffectiveWeight() > 0.99;
+  if (ch.seat && seated && now > ch.seat.settleAt && ch.seat.offset === undefined) {
     const hips = ch.vrm.humanoid.getNormalizedBoneNode('hips').getWorldPosition(new THREE.Vector3());
     ch.seat.offset = hips.y - root.position.y;
     ch.liftTo = ch.seat.y - ch.seat.offset;
@@ -2473,6 +2530,7 @@ renderer.setAnimationLoop(() => {
   if (editing) orbit.update(); else updateDirector(dt, now);
   updateSpotItems();
   updateGaze(dt, now);
+  updateWallClips();
   for (const ch of characters.values()) {
     if (!ch.root.visible) continue;
     updateActivity(ch, dt, now);
