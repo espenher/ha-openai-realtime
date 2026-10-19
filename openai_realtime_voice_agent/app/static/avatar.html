@@ -91,6 +91,8 @@
       <option value="asked">when asked to sit</option>
       <option value="idle">idle (by herself)</option>
     </select></div>
+    <div class="row" id="spotDoingRow" title="What she's doing here, as she'd say it: she's told this when asked what she's up to">
+      <input id="spotDoing" type="text" placeholder="Doing here, e.g. lying on the sofa reading"></div>
     <div class="row" id="spotLeanRow" title="Tilts her back (or forward, below 0) around her hips while she sits here">
       Lean back <input id="spotLean" type="number" class="w" step="1" min="-60" max="60" value="0"> °</div>
   </div>
@@ -2031,6 +2033,8 @@ function select(obj) {
     $('spotUseRow').style.display = s.type === 'sit' ? '' : 'none';
     $('spotUse').value = s.use || 'both';
     $('spotLean').value = s.lean || 0;
+    $('spotDoingRow').style.display = s.type === 'sit' ? '' : 'none';
+    $('spotDoing').value = s.doing || '';
     setMode('translate');
   }
 }
@@ -2167,6 +2171,10 @@ $('spotUse').onchange = e => {
   const s = spotOf(selected.userData.id);
   if (e.target.value === 'both') delete s.use; else s.use = e.target.value;
   listSpots();
+};
+$('spotDoing').oninput = e => {
+  const s = spotOf(selected.userData.id);
+  if (e.target.value.trim()) s.doing = e.target.value; else delete s.doing;
 };
 $('spotLean').oninput = e => {
   const s = spotOf(selected.userData.id);

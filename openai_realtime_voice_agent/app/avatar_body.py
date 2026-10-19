@@ -150,11 +150,35 @@ def _can_dance(layout: dict) -> bool:
     return (layout.get("character") or {}).get("dance") in animations or any("dance" in a.lower() for a in animations)
 
 
+# How she's placed in an animation, from its name (when a spot has no "Doing" text).
+POSTURES = ((re.compile(r"prone|lying|laying|lie\b|lay\b", re.I), "lying down"),
+            (re.compile(r"kneel", re.I), "kneeling"),
+            (re.compile(r"stand", re.I), "standing"))
+
+
+def describe_spot(spot: dict | None, layout: dict) -> str:
+    """What she's doing at a sit spot: its "Doing" text from the editor, or a guess from
+    its animation (lying, kneeling... and reading, with a reading animation or a book
+    set out at that spot)."""
+    if not spot:
+        return "You're sitting down."
+    doing = (spot.get("doing") or "").strip().rstrip(".")
+    if doing:
+        return doing[0].upper() + doing[1:] + "." if re.match(r"(?i)you(?:'re| are)\b", doing) else f"You're {doing}."
+    animation = spot.get("animation") or ""
+    posture = next((words for pattern, words in POSTURES if pattern.search(animation)), "sitting")
+    book = any(item.get("withSpot") == spot.get("id") and "book" in (item.get("file") or "").lower()
+               for item in layout.get("items") or [])
+    reading = ", reading a book" if book or re.search(r"read", animation, re.I) else ""
+    return f"You're {posture}{reading}."
+
+
 def describe_activity(layout: dict | None = None) -> str:
-    """Whether she's standing, sitting or dancing, as the avatar page last reported it."""
+    """Whether she's standing, sitting (and how) or dancing, as the avatar page last reported it."""
     layout = load_layout() if layout is None else layout
     if HUB.activity == "sitting":
-        return "You're sitting in your chair."
+        spot = next((s for s in layout.get("spots") or [] if s.get("id") == HUB.spot), None)
+        return describe_spot(spot, layout)
     if HUB.activity == "dancing":
         return "You're dancing."
     if any(spot.get("type") == "sit" for spot in layout.get("spots") or []) or _can_dance(layout):

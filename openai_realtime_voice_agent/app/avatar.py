@@ -140,6 +140,11 @@ class AvatarHub:
         """What the second persona's avatar is doing, as the pages last reported it."""
         return self._state["activity"]
 
+    @property
+    def spot(self) -> str | None:
+        """The sit spot she's at (its id in the layout), as the pages last reported it."""
+        return self._state["spot"]
+
     # ---------- server ----------
     async def start(self, port: int) -> None:
         await asyncio.to_thread(self._move_old_uploads)
