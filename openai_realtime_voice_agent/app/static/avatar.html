@@ -1814,7 +1814,7 @@ function drapeSkirt(ch, dt) {
 // and from the front her legs scissored through each other. Only as much as a step
 // needs, and the foot turned back so the sole stays flat.
 const SEATED_KNEE_SPREAD = THREE.MathUtils.degToRad(7);
-const WALK_FOOT_GAP = 0.06;   // least distance from her middle to the middle of each foot
+const WALK_FOOT_GAP = 0.025;  // least distance from her middle to the middle of each foot (more looks bow-legged)
 function spreadKnees(ch, dt) {
   const h = ch.vrm.humanoid;
   const hips = h.getNormalizedBoneNode('hips');
