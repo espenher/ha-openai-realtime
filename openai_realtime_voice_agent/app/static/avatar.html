@@ -223,6 +223,41 @@ for (const side of ['Left', 'Right']) {
 // Mixamo numbers the skeleton when a motion was downloaded for an uploaded
 // character ("mixamorig1:Hips", "mixamorig7:Hips"); three.js drops the colon.
 const mixamoBone = name => name.replace(/^mixamorig\d+/, 'mixamorig');
+// A walk made to be played in place (VRChat's are: the game moves the avatar) has no
+// travel to measure, so how fast it walks comes from her feet instead: how fast a
+// planted foot slides backward under her. Measured once at load, before anything
+// plays, and her pose put back after.
+function measureWalks(ch) {
+  const h = ch.vrm.humanoid, feet = ['leftFoot', 'rightFoot'].map(b => h.getRawBoneNode(b));
+  if (feet.some(f => !f)) return;
+  const toRoot = ch.root.matrixWorld.clone().invert();
+  for (const [name, action] of ch.actions) {
+    if (!/walk/i.test(name) || ch.travelSpeeds?.get(name)) continue;
+    const T = action.getClip().duration, N = 90, track = feet.map(() => []);
+    action.reset().setEffectiveWeight(1).play();
+    for (let i = 0; i <= N; i++) {
+      ch.mixer.setTime(T * i / N);
+      h.update();
+      ch.root.updateMatrixWorld(true);
+      feet.forEach((f, k) => track[k].push(f.getWorldPosition(new THREE.Vector3()).applyMatrix4(toRoot)));
+    }
+    action.stop();
+    // Backward speed (she faces +z) while a foot is down, within 1.5 cm of its lowest.
+    const speeds = [];
+    for (const p of track) {
+      const floor = Math.min(...p.map(v => v.y)) + 0.015;
+      for (let i = 1; i <= N; i++) if (p[i].y < floor && p[i - 1].y < floor) speeds.push((p[i - 1].z - p[i].z) * N / T);
+    }
+    speeds.sort((a, b) => a - b);
+    const speed = speeds[speeds.length >> 1];
+    if (speed > 0.2) (ch.travelSpeeds ??= new Map()).set(name, speed);
+  }
+  ch.mixer.stopAllAction();
+  h.resetNormalizedPose();
+  h.update();
+  ch.root.updateMatrixWorld(true);
+}
+
 // Keep the character on its spot without freezing her hips: sideways and forward
 // motion is kept relative to the first frame (a dance's sway, which is what keeps
 // her feet planted while her body moves), minus the clip's overall drift from
@@ -500,6 +535,7 @@ async function loadCharacter(file, animations) {
       ch.actions.set(name, action);
     } catch (e) { console.warn('animation', name, e); }
   }
+  measureWalks(ch);
   findGarments(ch);
   // A skirt that collides with the arms and hands but has nothing to stop it at
   // the hips gets shoved through the body by a hand on the hip; let skirts
@@ -507,8 +543,13 @@ async function loadCharacter(file, animations) {
   const arms = ['leftUpperArm', 'leftLowerArm', 'leftHand', 'rightUpperArm', 'rightLowerArm', 'rightHand']
     .map(bone => vrm.humanoid.getRawBoneNode(bone)).filter(Boolean);
   const onArm = obj => { for (let o = obj; o; o = o.parent) if (arms.includes(o)) return true; return false; };
+  // Skirts also move in her holder's space: she's carried across the room (walking at
+  // over a metre a second) and turned on the spot as a whole, and in world space that
+  // reads as a gale that blew the skirt up behind her. Her legs and hips still swing it.
   for (const joint of vrm.springBoneManager?.joints ?? []) {
-    if (/skirt/i.test(joint.bone.name)) joint.colliderGroups = joint.colliderGroups.filter(g => !g.colliders.some(onArm));
+    if (!/skirt/i.test(joint.bone.name)) continue;
+    joint.colliderGroups = joint.colliderGroups.filter(g => !g.colliders.some(onArm));
+    joint.center = root;
   }
   ch.drape = prepareDrape(vrm);
   ch.mixer.addEventListener('finished', e => {
