@@ -263,6 +263,28 @@ function measureWalks(ch) {
   ch.root.updateMatrixWorld(true);
 }
 
+// How high her hips are in each animation (at Size 1, from where she stands), so she
+// can be raised onto a seat as the pose blends in, rather than sitting down on the floor
+// first and floating up once the pose has settled. Measured once at load.
+function measureSeats(ch) {
+  const hips = ch.vrm.humanoid.getNormalizedBoneNode('hips');
+  if (!hips) return;
+  ch.seatOffsets = new Map();
+  const at = new THREE.Vector3();
+  for (const [name, action] of ch.actions) {
+    action.reset().setEffectiveWeight(1).play();
+    ch.mixer.setTime(0);
+    ch.vrm.humanoid.update();
+    ch.root.updateMatrixWorld(true);
+    ch.seatOffsets.set(name, hips.getWorldPosition(at).y - ch.root.position.y);
+    action.stop();
+  }
+  ch.mixer.stopAllAction();
+  ch.vrm.humanoid.resetNormalizedPose();
+  ch.vrm.humanoid.update();
+  ch.root.updateMatrixWorld(true);
+}
+
 // Keep the character on its spot without freezing her hips: sideways and forward
 // motion is kept relative to the first frame (a dance's sway, which is what keeps
 // her feet planted while her body moves), minus the clip's overall drift from
@@ -579,6 +601,7 @@ async function loadCharacter(file, animations) {
     } catch (e) { console.warn('animation', name, e); }
   }
   measureWalks(ch);
+  measureSeats(ch);
   findGarments(ch);
   // A skirt that collides with the arms and hands but has nothing to stop it at
   // the hips gets shoved through the body by a hand on the hip; let skirts
@@ -1317,8 +1340,23 @@ function sitAnimation(ch, spot) {
   const sits = [...ch.actions.keys()].filter(n => /sit/i.test(n) && !/to sit|to stand/i.test(n));
   return sits.find(n => /read/i.test(n)) || sits[0];
 }
-function walkTo(ch, spot, arrive) {
-  ch.move = { target: new THREE.Vector3().fromArray(spot.position || [0, 0, 0]), faceY: spot.rotationY || 0, arrive };
+// Where she walks up to a sit spot from (and steps out to when she gets up): on the
+// floor a little way out from it toward her home spot, which is out into the room for
+// a chair or sofa against a wall. So she doesn't walk through the furniture.
+const SEAT_APPROACH = 0.55;   // metres at Size 1
+const SEAT_SLIDE_S = 0.6;     // seconds from there into the seat
+function approachOf(ch, spot) {
+  const at = new THREE.Vector3().fromArray(spot.position || [0, 0, 0]);
+  const home = homeSpot();
+  const out = home && home !== spot ? new THREE.Vector3().fromArray(home.position || [0, 0, 0]).sub(at).setY(0) : new THREE.Vector3();
+  if (out.lengthSq() < 1e-4) out.set(Math.sin(spot.rotationY || 0), 0, Math.cos(spot.rotationY || 0));
+  out.normalize().multiplyScalar(SEAT_APPROACH * ch.root.scale.y);
+  return at.add(out).setY(home?.position?.[1] ?? 0);
+}
+function walkTo(ch, spot, arrive, path) {
+  const points = path ?? [new THREE.Vector3().fromArray(spot.position || [0, 0, 0])];
+  ch.move = { path: points, target: points[0], faceY: spot.rotationY || 0, arrive };
+  ch.slide = null;
   const walk = find(ch, /walk/i);
   // Move as fast as the walk itself steps (measured from the file), so the feet don't slide.
   ch.move.speed = (walk && ch.travelSpeeds?.get(walk)) || WALK_SPEED;
@@ -1328,12 +1366,15 @@ function goSit(ch, spot = pickSitSpot(ch), idle = isIdleSpot(spot || {})) {
   if (!spot || ch.move) return;
   ch.sitIdle = idle;
   if (ch.away === 'sit' && spot.id === ch.sitSpotId) return;
+  const from = ch.away === 'sit' ? spotOf(ch.sitSpotId) : null;
   if (ch.away === 'sit') {   // up from where she sits first
     ch.seat = null;
     ch.liftTo = homeSpot()?.position?.[1] ?? 0;
     ch.away = null;
   }
-  walkTo(ch, spot, () => sitAt(ch, spot));
+  // Out the front of where she is, over to the front of the next spot, and into it.
+  const path = [...(from ? [approachOf(ch, from)] : []), approachOf(ch, spot)];
+  walkTo(ch, spot, () => sitAt(ch, spot, true), path);
 }
 // Straight into a spot's pose, no walking (a page just opened, or "Sit here").
 function seatAt(ch, spot) {
@@ -1343,8 +1384,12 @@ function seatAt(ch, spot) {
   const anim = sitAnimation(ch, spot);
   if (anim && anim === ch.current) ch.actions.get(anim).reset();   // already that pose: start it over
   sitAt(ch, spot);
+  if (ch.liftTo !== undefined && ch.seat?.offset !== undefined) {   // straight there, no rising
+    ch.root.position.y = ch.liftTo;
+    ch.liftTo = undefined;
+  }
 }
-function sitAt(ch, spot) {
+function sitAt(ch, spot, slideIn = false) {
   const anim = sitAnimation(ch, spot);
   if (!anim) { ch.away = 'standing'; return; }
   ch.away = 'sit';
@@ -1355,11 +1400,21 @@ function sitAt(ch, spot) {
   // The marker's height is the seat's; left on the floor, assume an ordinary chair.
   const y = spot.position?.[1] ?? 0;
   ch.seat = { y: y > 0.15 ? y : y + 0.45 * ch.root.scale.y, settleAt: performance.now() / 1000 + 0.6 };
+  // Raised to the seat while the pose blends in, if this pose's height is known.
+  const offset = ch.seatOffsets?.get(anim);
+  if (offset !== undefined) {
+    ch.seat.offset = offset * ch.root.scale.y;
+    ch.liftTo = ch.seat.y - ch.seat.offset;
+  }
+  // From where she walked up to it, the last bit into the seat as she sits.
+  const to = new THREE.Vector3().fromArray(spot.position || [0, 0, 0]);
+  ch.slide = slideIn ? { from: ch.root.position.clone(), to, t: 0 } : null;
   reportActivity(ch);
 }
 function goHome(ch) {
   const spot = homeSpot();
   if (!spot || (!ch.away && !ch.move)) return;
+  const from = ch.away === 'sit' ? spotOf(ch.sitSpotId) : null;
   ch.seat = null;
   ch.liftTo = spot.position?.[1] ?? 0;   // back down to the floor as she gets up
   ch.away = null;
@@ -1367,7 +1422,7 @@ function goHome(ch) {
   walkTo(ch, spot, () => {
     play(ch, find(ch, phaseAnimation(lastPhase)) || find(ch, /idle/i), 0.5);
     reportActivity(ch);
-  });
+  }, from ? [approachOf(ch, from), new THREE.Vector3().fromArray(spot.position || [0, 0, 0])] : undefined);
 }
 // The add-on keeps what she's doing, tells her, and passes it between pages: a page
 // reports each change, follows changes other pages report, and one that's just been
@@ -1405,9 +1460,22 @@ function updateActivity(ch, dt, now) {
     root.position.y += (ch.liftTo - root.position.y) * Math.min(1, dt * 4);
     if (Math.abs(ch.liftTo - root.position.y) < 0.002) { root.position.y = ch.liftTo; ch.liftTo = undefined; }
   }
+  if (ch.slide) {
+    const sl = ch.slide;
+    sl.t = Math.min(1, sl.t + dt / SEAT_SLIDE_S);
+    const k = sl.t * sl.t * (3 - 2 * sl.t);
+    root.position.x = sl.from.x + (sl.to.x - sl.from.x) * k;
+    root.position.z = sl.from.z + (sl.to.z - sl.from.z) * k;
+    if (sl.t >= 1) ch.slide = null;
+  }
   const m = ch.move;
   if (m) {
     const dx = m.target.x - root.position.x, dz = m.target.z - root.position.z, dist = Math.hypot(dx, dz);
+    if (dist <= 0.03 && m.path?.length > 1) {   // on to the next point of the way
+      m.path.shift();
+      m.target = m.path[0];
+      return;
+    }
     if (dist > 0.03) {
       const heading = Math.atan2(dx, dz), turn = angleTo(root.rotation.y, heading);
       root.rotation.y += Math.sign(turn) * Math.min(Math.abs(turn), TURN_SPEED * dt);
