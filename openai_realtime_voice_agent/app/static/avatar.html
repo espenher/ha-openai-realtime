@@ -84,6 +84,8 @@
       </select>
     </div>
     <div class="row"><select id="spotAnim"></select><button id="sitHere" title="Put her in this spot's pose now, to fine-tune it">Sit here</button></div>
+    <div class="row" id="spotLeanRow" title="Tilts her back (or forward, below 0) around her hips while she sits here">
+      Lean back <input id="spotLean" type="number" class="w" step="1" min="-60" max="60" value="0"> °</div>
   </div>
 
   <h2>Animation</h2>
@@ -1547,6 +1549,22 @@ function layered(node) {
   if (node) (node.userData.layered ??= new THREE.Quaternion()).copy(node.quaternion);
 }
 
+// A sit spot can lean her back (its "Lean back", in degrees): her whole body turns
+// round her hips, so she stays on the seat while her knees come down (a pose made for
+// sitting upright, laid back across an armchair's arms).
+function leanBack(ch, dt) {
+  const hips = ch.vrm.humanoid.getNormalizedBoneNode('hips');
+  fromAnimation(hips);
+  const spot = ch.away === 'sit' ? (layout.spots || []).find(s => s.id === ch.sitSpotId) : null;
+  const goal = THREE.MathUtils.degToRad(spot?.lean || 0);
+  ch.lean = (ch.lean ?? 0) + (goal - (ch.lean ?? 0)) * Math.min(1, dt * 3);
+  if (!hips || Math.abs(ch.lean) < 1e-3) return;
+  // Round her own right-hand side: she faces +z in her holder, so that's -x.
+  const right = new THREE.Vector3(-1, 0, 0).applyQuaternion(ch.root.getWorldQuaternion(new THREE.Quaternion()));
+  turnBy(hips, new THREE.Quaternion().setFromAxisAngle(right, ch.lean));
+  layered(hips);
+}
+
 // Seated, her thighs (fuller than the ones the sitting animations were made on) press
 // into each other; each one is turned out a little at the hip, knees apart.
 const SEATED_KNEE_SPREAD = THREE.MathUtils.degToRad(7);
@@ -1665,6 +1683,8 @@ function select(obj) {
     $('spotType').value = s.type;
     fillSelect($('spotAnim'), ['(automatic)', ...animationNames], s.animation || '(automatic)');
     $('sitHere').style.display = s.type === 'sit' ? '' : 'none';
+    $('spotLeanRow').style.display = s.type === 'sit' ? '' : 'none';
+    $('spotLean').value = s.lean || 0;
     setMode('translate');
   }
 }
@@ -1791,6 +1811,11 @@ $('spotAnim').onchange = e => {
   listSpots();
   $('selName').textContent = `Spot: ${spotLabel(s)}`;
   if (active?.sitSpotId === s.id) seatAt(active, s);   // already sitting there: show the new pose
+};
+$('spotLean').oninput = e => {
+  const s = spotOf(selected.userData.id);
+  const lean = Math.max(-60, Math.min(60, Number(e.target.value) || 0));
+  if (lean) s.lean = lean; else delete s.lean;
 };
 $('sitHere').onclick = () => {
   const s = selected && spotOf(selected.userData.id);
@@ -2087,6 +2112,7 @@ renderer.setAnimationLoop(() => {
     endGestureIfDue(ch, now);
     ch.mixer.update(dt);
     updateHeadTurn(ch, dt);
+    leanBack(ch, dt);
     spreadKnees(ch, dt);
     const em = ch.vrm.expressionManager;
     em?.setValue('aa', mouth);
