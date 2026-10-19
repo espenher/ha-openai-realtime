@@ -998,53 +998,48 @@ async function loadRoom() {
 
 // ---------- walls in the way ----------
 // Some shots end up behind a wall (the close-up of her lying on the sofa along one
-// swings out past it). Then the wall is seen through: everything of the room on the
-// camera's side of that wall's inner face is clipped away, for each wall in the way
-// (two at most, for a corner). Only the room's big surfaces count as walls, and only
-// upright faces, so a lamp or the floor never cuts the room open.
+// swings out past it). Then the wall is seen through: the room on the camera's side of
+// that wall's inner face is clipped away (two walls at most, for a corner). The inner
+// faces are found once, when the room loads, by looking out from the middle of the
+// room in the four directions; each frame only checks which side of them the camera
+// is on, so nothing flickers as she or the camera moves.
 const wallClips = [new THREE.Plane(), new THREE.Plane()];
 const WALL_CLEAR = new THREE.Plane(new THREE.Vector3(0, 1, 0), 1e6);   // clips nothing
-let wallMeshes = [];
+const WALL_CUT_IN = 0.03;   // metres into the room from a wall's inner face
+let roomWalls = [];   // the inner face of each wall, facing into the room
 function setupWallClips() {
-  wallMeshes = [];
+  roomWalls = [];
   for (const plane of wallClips) plane.copy(WALL_CLEAR);
   roomGroup.updateMatrixWorld(true);
-  const size = new THREE.Vector3();
+  const big = [], size = new THREE.Vector3();
   roomGroup.traverse(o => {
     if (!o.isMesh) return;
     for (const m of [o.material].flat()) m.clippingPlanes = wallClips;
     new THREE.Box3().setFromObject(o).getSize(size);
-    if (Math.max(size.x, size.z) > 1.5) wallMeshes.push(o);
+    if (Math.max(size.x, size.z) > 1.5) big.push(o);
   });
-}
-const _wr = new THREE.Raycaster(), _wn = new THREE.Vector3(), _wt = new THREE.Vector3(), _wd = new THREE.Vector3();
-function updateWallClips() {
-  const found = [];
-  if (active?.root.visible && wallMeshes.length) {
-    const h = active.vrm.humanoid;
-    for (const bone of ['head', 'hips']) {
-      const node = h.getRawBoneNode(bone);
-      if (!node) continue;
-      node.getWorldPosition(_wt);
-      _wd.subVectors(_wt, camera.position);
-      const dist = _wd.length();
-      _wr.set(camera.position, _wd.normalize());
-      _wr.far = Math.max(0, dist - 0.05);
-      for (const hit of _wr.intersectObjects(wallMeshes, false)) {
-        if (!hit.face) continue;
-        _wn.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
-        if (Math.abs(_wn.y) > 0.4) continue;                        // floor, ceiling, slopes
-        if (_wn.dot(_wt.clone().sub(hit.point)) < 0) _wn.negate();   // facing her
-        const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(_wn, hit.point);
-        if (plane.distanceToPoint(_wt) < 0.2) continue;             // she's right against it
-        // Both faces of a thick wall come out alike: keep the one nearer her.
-        const same = found.find(f => f.normal.dot(plane.normal) > 0.95);
-        if (!same) found.push(plane);
-        else if (plane.distanceToPoint(_wt) < same.distanceToPoint(_wt)) same.copy(plane);
-      }
+  if (!big.length) return;
+  const box = new THREE.Box3();
+  for (const o of big) box.expandByObject(o);
+  const middle = box.getCenter(new THREE.Vector3()), ray = new THREE.Raycaster();
+  for (const dir of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]].map(d => new THREE.Vector3(...d))) {
+    // A few heights, nearest hit: a window at one height doesn't hide its wall.
+    let nearest = null;
+    for (const y of [0.4, 0.9, 1.4]) {
+      ray.set(new THREE.Vector3(middle.x, box.min.y + y, middle.z), dir);
+      const hit = ray.intersectObjects(big, false)[0];
+      if (hit && (!nearest || hit.distance < nearest.distance)) nearest = hit;
     }
+    // The cut goes a little into the room: right on the inner face, rounding left that
+    // face itself standing, a wall's worth of surface just in front of the camera.
+    if (nearest) roomWalls.push(new THREE.Plane().setFromNormalAndCoplanarPoint(dir.clone().negate(),
+      nearest.point.clone().addScaledVector(dir, -WALL_CUT_IN)));
   }
-  wallClips.forEach((plane, i) => plane.copy(found[i] ?? WALL_CLEAR));
+}
+function updateWallClips() {
+  // Behind a wall's inner face (or in the wall itself): see through that wall.
+  const behind = roomWalls.filter(plane => plane.distanceToPoint(camera.position) < WALL_CUT_IN + 0.02);
+  wallClips.forEach((plane, i) => plane.copy(behind[i] ?? WALL_CLEAR));
 }
 
 async function addItemObject(item) {
