@@ -511,9 +511,12 @@ function find(ch, re) {
 function play(ch, name, fade = 0.5) {
   const next = name && ch.actions.get(name);
   if (!next || name === ch.current) return;
-  const prev = ch.current && ch.actions.get(ch.current);
   next.reset().setEffectiveWeight(1).fadeIn(fade).play();
-  if (prev) prev.fadeOut(fade);
+  // Everything else still playing fades out, not just the last one: an animation left
+  // running underneath would blend into whatever comes next.
+  for (const action of ch.actions.values()) {
+    if (action !== next && action.isRunning() && action.getEffectiveWeight() > 0) action.fadeOut(fade);
+  }
   ch.current = name;
 }
 function phaseAnimation(phase) {
@@ -1139,7 +1142,8 @@ function seatAt(ch, spot) {
   ch.move = null;
   ch.root.position.fromArray(spot.position || [0, 0, 0]);
   ch.root.rotation.y = spot.rotationY || 0;
-  if (ch.current) ch.current = null;   // replay even if it's the same animation
+  const anim = sitAnimation(ch, spot);
+  if (anim && anim === ch.current) ch.actions.get(anim).reset();   // already that pose: start it over
   sitAt(ch, spot);
 }
 function sitAt(ch, spot) {
