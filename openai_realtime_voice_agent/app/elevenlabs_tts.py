@@ -6,16 +6,36 @@ socket, but its receive and keepalive tasks have already ended and are never
 restarted: nothing reads the new socket, so the reply came out as a 3 s pause
 and then less than a second of speech (2026-10-18 16:22), and every reply
 after that stayed broken until the add-on restarted.
+
+It also reads units out as words: ElevenLabs says "5°C" as "five degs".
 """
 
 from __future__ import annotations
 
 import logging
+import re
 
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
 from websockets.protocol import State
 
 logger = logging.getLogger(__name__)
+
+_NUMBER = r"(-|−)?(\d+(?:[.,]\d+)?)"
+_SPOKEN = [
+    # Temperatures: Celsius is what's meant here, so just "degrees".
+    (re.compile(_NUMBER + r"\s*°\s*C\b"), lambda m: f"{'minus ' if m[1] else ''}{m[2]} degrees"),
+    (re.compile(_NUMBER + r"\s*°\s*F\b"), lambda m: f"{'minus ' if m[1] else ''}{m[2]} degrees Fahrenheit"),
+    (re.compile(_NUMBER + r"\s*°"), lambda m: f"{'minus ' if m[1] else ''}{m[2]} degrees"),
+    (re.compile(r"(\d)\s*km/h\b"), lambda m: f"{m[1]} kilometres per hour"),
+    (re.compile(r"(\d)\s*m/s\b"), lambda m: f"{m[1]} metres per second"),
+]
+
+
+def spoken(text: str) -> str:
+    """Text as it should be said: units the voice reads badly written out in words."""
+    for pattern, words in _SPOKEN:
+        text = pattern.sub(words, text)
+    return text
 
 
 class SafeElevenLabsTTSService(ElevenLabsTTSService):
@@ -26,6 +46,10 @@ class SafeElevenLabsTTSService(ElevenLabsTTSService):
         if self._keepalive_task is not None and self._keepalive_task.done():
             self._keepalive_task = None
         await super()._connect()
+
+    async def run_tts(self, text: str):
+        async for frame in super().run_tts(spoken(text)):
+            yield frame
 
     async def ensure_connected(self) -> None:
         """Reconnect now if the socket dropped, so the next reply doesn't wait for it.
