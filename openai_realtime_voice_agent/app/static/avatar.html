@@ -274,8 +274,37 @@ function keepOnSpot(times, values, rest, scale, flip = false) {
     return rest.getComponent(axis) + (x - values[axis] - drift) * scale * (flip ? -1 : 1);
   });
 }
+// An FBX's motion: Mixamo calls its take "mixamo.com"; one saved again from Blender
+// is named after the armature and action ("Armature|mixamo.com"), so a file with a
+// single take on a Mixamo skeleton plays too.
+function motionClip(asset) {
+  const named = THREE.AnimationClip.findByName(asset.animations, 'mixamo.com');
+  if (named || asset.animations.length !== 1) return named;
+  let mixamo = false;
+  asset.traverse(o => { mixamo ||= mixamoBone(o.name) === 'mixamorigHips'; });
+  return mixamo ? asset.animations[0] : null;
+}
+// Blender saves an FBX's bones in the pose its animation had on the frame it was
+// exported from, keeping the real resting pose only in the skin's bind pose. The
+// motion is measured against the resting pose, so a file with a skin has its bones
+// put into the bind pose first (for Mixamo's own files and the converter's, that's
+// the T-pose they're already in).
+function restFromBindPose(asset) {
+  let skeleton = null;
+  asset.traverse(o => { if (!skeleton && o.isSkinnedMesh) skeleton = o.skeleton; });
+  if (!skeleton) return;
+  asset.updateMatrixWorld(true);
+  const bound = new Map(skeleton.bones.map((b, i) => [b, skeleton.boneInverses[i].clone().invert()]));
+  const local = new THREE.Matrix4();
+  asset.traverse(o => {   // parents before children
+    const world = bound.get(o);
+    if (!world || !o.parent) return;
+    local.copy(o.parent.matrixWorld).invert().multiply(world).decompose(o.position, o.quaternion, o.scale);
+    o.updateMatrixWorld(true);
+  });
+}
 function retarget(asset, vrm) {
-  const clip = THREE.AnimationClip.findByName(asset.animations, 'mixamo.com');
+  const clip = motionClip(asset);
   const tracks = [];
   const restInv = new THREE.Quaternion(), parentRest = new THREE.Quaternion(), q = new THREE.Quaternion(), v = new THREE.Vector3();
   let motionHips = null;
@@ -2155,7 +2184,8 @@ async function boot() {
   for (const f of fbxs) {
     try {
       const asset = await fbx.loadAsync(`files/${encodeURIComponent(f)}`);
-      if (THREE.AnimationClip.findByName(asset.animations, 'mixamo.com')) animations.push([f.replace(/\.fbx$/i, ''), vrm => retarget(asset, vrm)]);
+      restFromBindPose(asset);
+      if (motionClip(asset)) animations.push([f.replace(/\.fbx$/i, ''), vrm => retarget(asset, vrm)]);
     } catch (e) { console.warn('fbx', f, e); }
   }
   for (const f of vrmas) {
