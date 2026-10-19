@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Optional, Callable, Awaitable, Dict
@@ -340,6 +341,15 @@ class ConnectionRecovery(FrameProcessor):
             logger.warning(f"⚠️ could not emit idle after turn-ending error: {e!r}")
 
 
+_FILLERS = {"hmm", "hm", "hmmm", "mm", "mmm", "mhm", "uh", "um", "uhm", "umm", "er", "erm", "ehm", "ah", "eh", "oh", "huh"}
+
+
+def _is_filler(text: str) -> bool:
+    """Only a hesitation sound or two ("Hmm.", "uh, um"), nothing said."""
+    words = re.findall(r"[^\W\d_]+", text.lower())
+    return 0 < len(words) <= 3 and all(w in _FILLERS for w in words)
+
+
 class WebSocketHandler:
     """Handles WebSocket transport initialization, pipeline building, and event management."""
     
@@ -668,8 +678,9 @@ class WebSocketHandler:
         # Set while an announcement (see _announce) is being spoken, so the
         # interrupt / late-audio kill machinery doesn't cancel it.
         _announcing = {"v": False}
-        # The HA agent's answer in progress (ha_agent.py), so a stop or a newer turn can drop it.
-        _agent_task = {"t": None}
+        # The HA agent's answer in progress (ha_agent.py), so a stop or a newer turn can drop
+        # it, and what it was asked ("text"), until its answer has been spoken.
+        _agent_task = {"t": None, "text": ""}
         # When the device last woke (for dropping wake-word scraps, see _on_user_transcript).
         _last_wake = {"t": 0.0}
 
@@ -915,6 +926,7 @@ class WebSocketHandler:
                 reply = "Sorry, I couldn't get an answer just now."
             finally:
                 TURN_LIVENESS.tool_finished()
+            _agent_task["text"] = ""
             await agent_replies.speak(reply)
 
         async def _quick_switch_persona(target: str) -> bool:
@@ -1024,8 +1036,20 @@ class WebSocketHandler:
             if AGENT_MODE.active:
                 if scrap or STALE_AUDIO.active or not text.strip():
                     return
-                if _agent_task["t"] is not None:
+                busy = _agent_task["t"] is not None and not _agent_task["t"].done()
+                # A "hmm" or "uh" while the agent is still working on an answer isn't a new
+                # request: it used to replace it, and the answer (to "can you play it?",
+                # whose song had already started) was never spoken (2026-10-19 13:27).
+                if busy and _is_filler(text):
+                    logger.info(f"🧠 filler while the agent is answering ({text!r}) → ignored")
+                    return
+                # More words while it's still answering: the VAD cut the user off at a pause.
+                # Ask about all of it, not just the end, which on its own made no sense
+                # ("Should we find out which song this is?" without the song, 13:26).
+                if busy:
                     _agent_task["t"].cancel()
+                    text = f"{_agent_task['text']} {text}".strip()
+                _agent_task["text"] = text
                 _agent_task["t"] = asyncio.create_task(_answer_with_agent(text))
                 return
             if scrap:
