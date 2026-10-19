@@ -188,6 +188,11 @@ class PhaseEmitter(FrameProcessor):
         # when the last reply ended with a question mark.
         self._request_follow_up = request_follow_up
         self._last_reply_question = False
+        # When the last follow-up was asked for. A voice that comes sentence by sentence
+        # (ElevenLabs) can pause long enough to look finished: if more of the reply
+        # plays shortly after, that request was closed again by `replying`, so it's
+        # asked for once more when the reply really ends.
+        self._follow_up_asked_at = None
         # Reply-complete tracking, fed by the assistant TranscriptLogger tap
         # (response start/end brackets). Lets BotStoppedSpeaking skip the idle
         # debounce once the final reply of a turn has finished.
@@ -338,6 +343,7 @@ class PhaseEmitter(FrameProcessor):
         await self._emit("idle")
         if self._last_reply_question and self._request_follow_up is not None:
             self._last_reply_question = False
+            self._follow_up_asked_at = time.monotonic()
             logger.info("❓ reply ended with a question → request_follow_up")
             try:
                 await self._request_follow_up()
@@ -397,6 +403,7 @@ class PhaseEmitter(FrameProcessor):
         elif isinstance(frame, UserStartedSpeakingFrame):
             self._suppress_thinking = False
             self._last_reply_question = False
+            self._follow_up_asked_at = None
             self._reply_done = False
             # A: a genuine utterance has begun this turn → not a dangling VAD,
             # and the kill-window must NOT cancel THIS turn's response.
@@ -437,6 +444,10 @@ class PhaseEmitter(FrameProcessor):
             self._tts_active = False
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._suppress_thinking = False
+            if self._follow_up_asked_at is not None and time.monotonic() - self._follow_up_asked_at < 3.0:
+                self._last_reply_question = True
+                logger.info("❓ more of the reply after the follow-up request → asking again when it ends")
+            self._follow_up_asked_at = None
             self._cancel_pending_idle()
             self._cancel_watchdog()
             await self._emit("replying")
