@@ -1475,6 +1475,29 @@ function frameGesture(ch, name, want, seconds, start) {
 const HEAD_TURN_MAX = THREE.MathUtils.degToRad(35);
 const _hq = new THREE.Quaternion(), _pq = new THREE.Quaternion(), _dq = new THREE.Quaternion(), _nq = new THREE.Quaternion();
 const _hf = new THREE.Vector3(), _hw = new THREE.Vector3(), _hp = new THREE.Vector3();
+// Seated, her thighs (fuller than the ones the sitting animations were made on) press
+// into each other; each one is turned out a little at the hip, knees apart.
+const SEATED_KNEE_SPREAD = THREE.MathUtils.degToRad(7);
+function spreadKnees(ch, dt) {
+  ch.kneeSpread = (ch.kneeSpread ?? 0) + ((ch.away === 'sit' ? 1 : 0) - (ch.kneeSpread ?? 0)) * Math.min(1, dt * 3);
+  if (ch.kneeSpread < 0.01) return;
+  const h = ch.vrm.humanoid;
+  const hips = h.getNormalizedBoneNode('hips');
+  const L = h.getNormalizedBoneNode('leftUpperLeg'), R = h.getNormalizedBoneNode('rightUpperLeg');
+  if (!hips || !L || !R) return;
+  hips.updateWorldMatrix(true, true);
+  const at = n => n.getWorldPosition(new THREE.Vector3());
+  const outward = at(L).sub(at(R)).normalize();   // toward her left
+  for (const [thigh, knee, out] of [[L, h.getNormalizedBoneNode('leftLowerLeg'), outward],
+                                    [R, h.getNormalizedBoneNode('rightLowerLeg'), outward.clone().negate()]]) {
+    if (!knee) continue;
+    const along = at(knee).sub(at(thigh)).normalize();
+    const axis = new THREE.Vector3().crossVectors(along, out);
+    if (axis.lengthSq() < 1e-8) continue;
+    turnBy(thigh, new THREE.Quaternion().setFromAxisAngle(axis.normalize(), SEATED_KNEE_SPREAD * ch.kneeSpread));
+  }
+}
+
 function updateHeadTurn(ch, dt) {
   const head = ch.vrm.humanoid.getNormalizedBoneNode('head');
   if (!head || !ch.headForward) return;
@@ -1970,6 +1993,7 @@ renderer.setAnimationLoop(() => {
     endGestureIfDue(ch, now);
     ch.mixer.update(dt);
     updateHeadTurn(ch, dt);
+    spreadKnees(ch, dt);
     const em = ch.vrm.expressionManager;
     em?.setValue('aa', mouth);
     nextBlink -= dt;
