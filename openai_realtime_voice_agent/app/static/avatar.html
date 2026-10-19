@@ -1822,7 +1822,8 @@ function spreadKnees(ch, dt) {
   const LF = h.getNormalizedBoneNode('leftFoot'), RF = h.getNormalizedBoneNode('rightFoot');
   for (const node of [L, R, LF, RF]) fromAnimation(node);
   ch.kneeSpread = (ch.kneeSpread ?? 0) + ((ch.away === 'sit' ? 1 : 0) - (ch.kneeSpread ?? 0)) * Math.min(1, dt * 3);
-  ch.walkGap = (ch.walkGap ?? 0) + ((ch.move ? 1 : 0) - (ch.walkGap ?? 0)) * Math.min(1, dt * 4);
+  const walking = ch.move || /walk/i.test(ch.current || '');   // also a walk tried out in the editor
+  ch.walkGap = (ch.walkGap ?? 0) + ((walking ? 1 : 0) - (ch.walkGap ?? 0)) * Math.min(1, dt * 4);
   if ((ch.kneeSpread < 0.01 && ch.walkGap < 0.01) || !hips || !L || !R) return;
   hips.updateWorldMatrix(true, true);
   const at = n => n.getWorldPosition(new THREE.Vector3());
