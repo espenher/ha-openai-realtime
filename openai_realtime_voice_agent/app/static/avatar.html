@@ -510,6 +510,7 @@ async function loadCharacter(file, animations) {
   for (const joint of vrm.springBoneManager?.joints ?? []) {
     if (/skirt/i.test(joint.bone.name)) joint.colliderGroups = joint.colliderGroups.filter(g => !g.colliders.some(onArm));
   }
+  ch.drape = prepareDrape(vrm);
   ch.mixer.addEventListener('finished', e => {
     if (e.action === ch.actions.get(ch.current)) playFor(ch, phaseAnimation(lastPhase));
   });
@@ -1593,6 +1594,178 @@ function leanBack(ch, dt) {
   layered(hips);
 }
 
+// Seated, her skirt (spring bones hanging from her waist) can't get onto her lap by
+// itself: her thighs come up from below and push it down, and out through them. So
+// while she sits, each skirt chain is laid out from the waist down instead: every
+// piece hangs the way it does when she stands, unless that runs into a thigh, a shin
+// or the lap between her thighs; then it's turned outward until it rests on top. The
+// legs' shape comes from her body mesh (how far the skin is from each leg bone, all
+// the way round it). The jacket hem hangs from the same bones and follows along.
+const DRAPE_TB = 8, DRAPE_AB = 12;   // a leg's shape: rings along the bone, steps round it
+const DRAPE_MARGIN = 0.025;          // gap kept from the skin, for the cloth between bones
+const DRAPE_MAX = 120;               // furthest a piece is turned up, in degrees
+function measureLeg(vrm, from, to) {
+  const A = vrm.humanoid.getRawBoneNode(from), B = vrm.humanoid.getRawBoneNode(to);
+  if (!A || !B) return null;
+  const axis = B.position.clone(), L = axis.length();
+  axis.normalize();
+  const ref = Math.abs(axis.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+  ref.addScaledVector(axis, -ref.dot(axis)).normalize();
+  const ref2 = new THREE.Vector3().crossVectors(axis, ref);
+  const r = Array.from({ length: DRAPE_TB }, () => new Array(DRAPE_AB).fill(0));
+  const toLeg = A.matrixWorld.clone().invert(), p = new THREE.Vector3(), perp = new THREE.Vector3();
+  vrm.scene.traverse(m => {
+    if (!m.isSkinnedMesh || /skirt/i.test(m.name)) return;
+    const bone = m.skeleton.bones.indexOf(A);
+    if (bone < 0) return;
+    const { skinIndex, skinWeight } = m.geometry.attributes;
+    for (let i = 0; i < skinIndex.count; i++) {
+      let w = 0;
+      for (let k = 0; k < 4; k++) if (skinIndex.getComponent(i, k) === bone) w += skinWeight.getComponent(i, k);
+      if (w < 0.5) continue;
+      m.getVertexPosition(i, p).applyMatrix4(m.matrixWorld).applyMatrix4(toLeg);
+      const t = p.dot(axis) / L;
+      if (t < 0 || t > 1) continue;
+      perp.copy(p).addScaledVector(axis, -t * L);
+      const a = (Math.atan2(perp.dot(ref2), perp.dot(ref)) / (2 * Math.PI) + 1) % 1;
+      const ring = r[Math.min(DRAPE_TB - 1, Math.floor(t * DRAPE_TB))], at = Math.min(DRAPE_AB - 1, Math.floor(a * DRAPE_AB));
+      ring[at] = Math.max(ring[at], perp.length());
+    }
+  });
+  // Gaps (no skin found that way) take the ring's widest.
+  for (const ring of r) { const widest = Math.max(...ring); ring.forEach((v, i) => { if (!v) ring[i] = widest; }); }
+  for (let i = 0; i < DRAPE_TB; i++) if (!r[i][0]) r[i] = (r[i - 1]?.[0] ? r[i - 1] : r.find(x => x[0]) || r[i]).slice();
+  if (!r.some(ring => ring[0])) return null;
+  return { A, B, axis, ref, ref2, L, r };
+}
+function prepareDrape(vrm) {
+  const hips = vrm.humanoid.getRawBoneNode('hips');
+  const joints = [...(vrm.springBoneManager?.joints ?? [])].filter(j => /skirt/i.test(j.bone.name));
+  if (!hips || !joints.length) return null;
+  vrm.scene.updateMatrixWorld(true);
+  const legs = [['leftUpperLeg', 'leftLowerLeg'], ['rightUpperLeg', 'rightLowerLeg'],
+                ['leftLowerLeg', 'leftFoot'], ['rightLowerLeg', 'rightFoot']].map(([a, b]) => measureLeg(vrm, a, b));
+  if (legs.some(g => !g)) return null;
+  // Directions are kept in the hips' frame: how each piece hangs standing, and which
+  // way is "outward" for each chain (level, from her middle to where it hangs from).
+  const hipsInv = hips.getWorldQuaternion(new THREE.Quaternion()).invert();
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(hipsInv);
+  const byBone = new Map(joints.map(j => [j.bone, j]));
+  const chains = [];
+  for (const j of joints) {
+    if (byBone.has(j.bone.parent)) continue;   // only from the top of each chain
+    const segs = [];
+    for (let jj = j; jj; jj = jj.child && byBone.get(jj.child)) {
+      const tail = (jj._initialLocalChildPosition ?? jj.child?.position ?? new THREE.Vector3(0, -0.05, 0)).clone();
+      const len = tail.length();
+      if (len < 1e-4) continue;
+      const from = jj.bone.getWorldPosition(new THREE.Vector3());
+      const rest = jj.bone.localToWorld(tail.clone()).sub(from).normalize().applyQuaternion(hipsInv);
+      segs.push({ bone: jj.bone, tail, rest });
+    }
+    const at = hips.worldToLocal(j.bone.getWorldPosition(new THREE.Vector3()));
+    const out = at.addScaledVector(up, -at.dot(up)).normalize();
+    if (segs.length) chains.push({ segs, out });
+  }
+  const widest = (t) => (Math.max(...legs[0].r[t]) + Math.max(...legs[1].r[t])) / 2;
+  return { hips, legs, chains, inv: legs.map(() => new THREE.Matrix4()), scale: 1, weight: 0,
+           lap: { a: new THREE.Vector3(), b: new THREE.Vector3(), dir: new THREE.Vector3(), len: 1,
+                  r0: widest(1), r1: widest(DRAPE_TB - 1), rWorld: [0, 0] } };
+}
+function legRadius(g, t, perp) {
+  const a = (Math.atan2(perp.dot(g.ref2), perp.dot(g.ref)) / (2 * Math.PI) + 1) % 1 * DRAPE_AB - 0.5;
+  const tf = Math.max(0, Math.min(DRAPE_TB - 1.001, t * DRAPE_TB - 0.5));
+  const t0 = Math.floor(tf), t1 = Math.min(DRAPE_TB - 1, t0 + 1), ft = tf - t0;
+  const a0 = (Math.floor(a) + DRAPE_AB) % DRAPE_AB, a1 = (a0 + 1) % DRAPE_AB, fa = a - Math.floor(a);
+  const round = ring => ring[a0] * (1 - fa) + ring[a1] * fa;
+  return round(g.r[t0]) * (1 - ft) + round(g.r[t1]) * ft;
+}
+const _dp = new THREE.Vector3(), _dperp = new THREE.Vector3(), _dx = new THREE.Vector3(), _dfrom = new THREE.Vector3();
+const _dout = new THREE.Vector3(), _d0 = new THREE.Vector3(), _dd = new THREE.Vector3(), _daxis = new THREE.Vector3();
+const _dcur = new THREE.Vector3(), _dhq = new THREE.Quaternion(), _dturn = new THREE.Quaternion();
+const _dbq = new THREE.Quaternion(), _dpq = new THREE.Quaternion(), _dI = new THREE.Quaternion();
+// How far a point is outside her legs and lap (in metres, less the margin; < 0 inside).
+function drapeClearance(D, x) {
+  let worst = Infinity;
+  for (let i = 0; i < D.legs.length; i++) {
+    const g = D.legs[i];
+    _dp.copy(x).applyMatrix4(D.inv[i]);
+    const t = THREE.MathUtils.clamp(_dp.dot(g.axis) / g.L, 0, 1);
+    _dperp.copy(_dp).addScaledVector(g.axis, -t * g.L);
+    worst = Math.min(worst, (_dperp.length() - legRadius(g, t, _dperp)) * D.scale);
+  }
+  const lap = D.lap;
+  _dp.copy(x).sub(lap.a);
+  const t = THREE.MathUtils.clamp(_dp.dot(lap.dir) / lap.len, 0, 1);
+  _dperp.copy(_dp).addScaledVector(lap.dir, -t * lap.len);
+  worst = Math.min(worst, _dperp.length() - (lap.rWorld[0] + (lap.rWorld[1] - lap.rWorld[0]) * t));
+  return worst - DRAPE_MARGIN;
+}
+function drapeSkirt(ch, dt) {
+  const D = ch.drape;
+  if (!D) return;
+  // On while she sits with her thighs raised (fading in from 40° to 70° off straight
+  // down), so the physics has the skirt while she walks, stands or gets up.
+  let level = 0;
+  if (ch.away === 'sit') {
+    ch.root.updateMatrixWorld(true);
+    for (const g of D.legs.slice(0, 2)) {
+      const down = -_dx.copy(g.axis).transformDirection(g.A.matrixWorld).y;
+      level += THREE.MathUtils.clamp((Math.acos(THREE.MathUtils.clamp(down, -1, 1)) - 0.7) / 0.5, 0, 1) / 2;
+    }
+  }
+  D.weight += (level - D.weight) * Math.min(1, dt * 4);
+  if (D.weight < 0.01) return;
+
+  const [L, R] = D.legs;
+  D.scale = L.A.matrixWorld.getMaxScaleOnAxis();
+  D.legs.forEach((g, i) => D.inv[i].copy(g.A.matrixWorld).invert());
+  // The lap: the space between her thighs, as high as they are.
+  const lap = D.lap;
+  lap.a.setFromMatrixPosition(L.A.matrixWorld).add(_dx.setFromMatrixPosition(R.A.matrixWorld)).multiplyScalar(0.5);
+  lap.b.setFromMatrixPosition(L.B.matrixWorld).add(_dx.setFromMatrixPosition(R.B.matrixWorld)).multiplyScalar(0.5);
+  lap.len = Math.max(1e-4, lap.a.distanceTo(lap.b));
+  lap.dir.subVectors(lap.b, lap.a).divideScalar(lap.len);
+  lap.rWorld[0] = lap.r0 * D.scale;
+  lap.rWorld[1] = lap.r1 * D.scale;
+
+  D.hips.getWorldQuaternion(_dhq);
+  for (const c of D.chains) {
+    _dout.copy(c.out).applyQuaternion(_dhq);
+    c.segs[0].bone.getWorldPosition(_dfrom);
+    for (const s of c.segs) {
+      _d0.copy(s.rest).applyQuaternion(_dhq);
+      _dcur.copy(s.tail).applyMatrix4(s.bone.matrixWorld).sub(_dfrom);
+      const len = _dcur.length();
+      _dcur.divideScalar(len);
+      // A piece can start inside a leg (her waist low against a raised thigh): it only has
+      // to get no deeper halfway, and end clear of it (or at least on its way out).
+      const start = Math.min(0, drapeClearance(D, _dfrom));
+      const fits = d => drapeClearance(D, _dx.copy(_dfrom).addScaledVector(d, len)) >= Math.min(0, start + len * 0.5)
+        && drapeClearance(D, _dx.copy(_dfrom).addScaledVector(d, len * 0.5)) >= start;
+      _dd.copy(_d0);
+      _daxis.crossVectors(_d0, _dout);
+      if (_daxis.lengthSq() > 1e-6 && !fits(_d0)) {
+        _daxis.normalize();
+        const turned = deg => _dd.copy(_d0).applyAxisAngle(_daxis, THREE.MathUtils.degToRad(deg));
+        let lo = 0, hi = 0;
+        for (let deg = 8; deg <= DRAPE_MAX && !hi; deg += 8) if (fits(turned(deg))) hi = deg; else lo = deg;
+        if (!hi) hi = DRAPE_MAX;
+        else for (let i = 0; i < 4; i++) { const mid = (lo + hi) / 2; if (fits(turned(mid))) hi = mid; else lo = mid; }
+        turned(hi);
+      }
+      // Turn the bone so it points that way (part way while fading in or out).
+      _dturn.setFromUnitVectors(_dcur, _dd);
+      if (D.weight < 1) _dturn.slerp(_dI, 1 - D.weight);
+      s.bone.getWorldQuaternion(_dbq).premultiply(_dturn);
+      s.bone.quaternion.copy(s.bone.parent.getWorldQuaternion(_dpq).invert().multiply(_dbq));
+      s.bone.updateMatrix();   // spring bones don't rebuild their own matrices
+      s.bone.updateMatrixWorld(true);
+      _dfrom.copy(s.tail).applyMatrix4(s.bone.matrixWorld);
+    }
+  }
+}
+
 // Seated, her thighs (fuller than the ones the sitting animations were made on) press
 // into each other; each one is turned out a little at the hip, knees apart.
 const SEATED_KNEE_SPREAD = THREE.MathUtils.degToRad(7);
@@ -2163,6 +2336,7 @@ renderer.setAnimationLoop(() => {
     updateMood(ch, dt, now);
     updateBook(ch);
     ch.vrm.update(dt);
+    drapeSkirt(ch, dt);
   }
   if (debugOn) {
     debugEl.style.display = 'block';
