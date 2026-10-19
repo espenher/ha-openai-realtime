@@ -417,8 +417,14 @@ function plantFeet(result, asset, clip, vrm, motionHips, hipsScale, flip) {
   const forward = new THREE.Vector3(0, 0, flip ? -1 : 1);
   const values = legs.map(() => ({ upper: [], lower: [], foot: [] }));
   const starts = [];
+  // The legs start every frame from the motion's own angles: the mixer leaves a bone
+  // alone when its value hasn't changed, so on a still stretch each frame would start
+  // from the last frame's bent leg instead.
+  const own = legs.map(l => Object.fromEntries(['upper', 'lower', 'foot'].map(part => [part,
+    result.tracks.find(tr => tr.name === `${l[part].name}.quaternion`)?.createInterpolant()])));
   times.forEach((t, k) => {
     mixer.setTime(t);
+    legs.forEach((l, i) => { for (const part of ['upper', 'lower', 'foot']) if (own[i][part]) l[part].quaternion.fromArray(own[i][part].evaluate(t)); });
     rigRoot.updateMatrixWorld(true);
     const along = (t - times[0]) / span;
     legs.forEach((l, i) => {
@@ -428,7 +434,10 @@ function plantFeet(result, asset, clip, vrm, motionHips, hipsScale, flip) {
       const footTurn = l.foot.getWorldQuaternion(new THREE.Quaternion());
       const target = l.foot.getWorldPosition(new THREE.Vector3())
         .lerp(rigRoot.localToWorld(starts[i].clone().add(move)), planted[i][k]);
-      if (k > 0 && planted[i][k] > 0) {
+      // The first frame too: re-bent to the very spot it's already at, a leg still comes out
+      // a hair different from the motion's own angles, and a loop then jumped back to
+      // those for one frame every time round (a still pose twitched every 8 s).
+      if (planted[i][k] > 0) {
         const bendAxis = new THREE.Vector3(0, 1, 0).cross(rigRoot.localToWorld(forward.clone()).sub(rigRoot.getWorldPosition(new THREE.Vector3())));
         reachWith(l, target, bendAxis);
         turnTo(l.foot, footTurn);
