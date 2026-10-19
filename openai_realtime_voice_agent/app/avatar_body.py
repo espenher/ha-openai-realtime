@@ -36,7 +36,7 @@ VARIANT = re.compile(r"^(.+?)__(.+?)__(\d+)-(.+)_([0-9a-f]{6})\.(png|jpe?g)$", r
 # Clothes she can take off and put back on herself; the rest of the outfit stays on.
 CHANGEABLE = {"jacket": "Jacket", "tie": "Tie", "socks": "Sock", "sneakers": "Sneaker", "shirt": "Shirt", "skirt": "Skirt", "panties": "UnderwearBottom", "top": "UnderwearTop"}
 GARMENT_WORDS = {"Jacket": "jacket", "Shirt": "shirt", "Skirt": "skirt", "Sneaker": "sneakers", "Sock": "socks",
-                 "Tie": "tie", "UnderwearBottom": "stripes", "UnderwearTop": "tankie"}
+                 "Tie": "tie", "UnderwearBottom": "stripes", "UnderwearTop": "top"}
 # Colour variant textures she can switch, by what they colour.
 COLOUR_SLOTS = {"hair": "Hair_BaseColor", "eyes": "Body_BaseColor", "jacket": "Outfit2_BaseColor"}
 # Rough colour names for the variants' swatch colours.
