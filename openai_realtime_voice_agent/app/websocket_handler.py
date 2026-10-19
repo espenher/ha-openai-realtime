@@ -785,6 +785,8 @@ class WebSocketHandler:
             phase_emitter.note_device_mic_opened()
             _last_wake["t"] = time.monotonic()
             _announcing["v"] = False
+            # Woken over a reply (or while one was being worked out): the user's turn now.
+            await phase_emitter.barge_in()
             # New turn boundary: drop any pending post-tool kill so it can't
             # leak onto this fresh turn's response.
             _kill_next_response["v"] = False
@@ -1052,6 +1054,7 @@ class WebSocketHandler:
             self._serializer.set_session_start_handler(_on_device_session_start)
             self._serializer.set_mic_flush_handler(_on_device_mic_flush)
             self._serializer.set_wake_handler(_on_device_wake)
+            self._serializer.set_output_gate(lambda: phase_emitter.barged)
 
         return pipeline, runner, task
     

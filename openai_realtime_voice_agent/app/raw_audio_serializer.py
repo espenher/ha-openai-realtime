@@ -50,6 +50,13 @@ class RawAudioSerializer(FrameSerializer):
         # Resets the dangling-VAD guard's "speech since wake" tracker. Set by
         # WebSocketHandler.build_pipeline.
         self._on_wake = None
+        # Optional no-arg predicate: while it returns True, reply audio is dropped
+        # instead of sent (what's left of a reply the user woke the device over).
+        self._drop_output = None
+
+    def set_output_gate(self, drop):
+        """Register a predicate that says when to drop outgoing reply audio."""
+        self._drop_output = drop
 
     def set_interrupt_handler(self, handler):
         """Register the async no-arg callback fired on a device 'interrupt'."""
@@ -162,6 +169,8 @@ class RawAudioSerializer(FrameSerializer):
         Other frames are not serialized (return empty bytes).
         """
         if isinstance(frame, OutputAudioRawFrame):
+            if self._drop_output is not None and self._drop_output():
+                return b""
             audio_bytes = frame.audio
             logger.debug(f"📤 Serializing OutputAudioRawFrame: {len(audio_bytes)} bytes")
             return audio_bytes

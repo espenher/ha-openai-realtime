@@ -199,6 +199,10 @@ class PhaseEmitter(FrameProcessor):
         # plays shortly after, that request was closed again by `replying`, so it's
         # asked for once more when the reply really ends.
         self._follow_up_asked_at = None
+        # Set when the user woke the device while a reply was still coming out (barge_in):
+        # the rest of that reply is dropped on its way to the device and its speaking
+        # start/stop no longer moves the phase, until it has finished or a new reply starts.
+        self._barged = False
         # Reply-complete tracking, fed by the assistant TranscriptLogger tap
         # (response start/end brackets). Lets BotStoppedSpeaking skip the idle
         # debounce once the final reply of a turn has finished.
@@ -227,8 +231,32 @@ class PhaseEmitter(FrameProcessor):
         """Async callable run when speech starts while the device mic is closed."""
         self._on_stale_speech = handler
 
+    @property
+    def barged(self) -> bool:
+        """True while what's left of an interrupted reply is to be dropped."""
+        return self._barged
+
+    async def barge_in(self) -> bool:
+        """The device woke while a reply was still playing or being worked out: the
+        user is taking the turn. Open the device's mic now (`listening`), forget the
+        reply's follow-up, and let the rest of its audio drain unheard. Without this the
+        phase stayed `replying` (device mic gated, the user's words lost) until the
+        reply's audio ended, and its idle + follow-up then chimed in mid-sentence."""
+        if self._current not in ("replying", "thinking"):
+            return False
+        self._barged = True
+        self._cancel_pending_idle()
+        self._cancel_watchdog()
+        self._last_reply_question = False
+        self._follow_up_asked_at = None
+        self._reply_done = False
+        logger.info("👋 woken mid-reply → the user's turn now (rest of the reply dropped)")
+        await self._emit("listening")
+        return True
+
     def note_response_start(self) -> None:
         """An assistant response began (LLMFullResponseStartFrame)."""
+        self._barged = False
         self._response_open = True
         self._reply_done = False
         self._last_reply_question = False
@@ -455,6 +483,10 @@ class PhaseEmitter(FrameProcessor):
             self._tts_active = True
         elif isinstance(frame, TTSStoppedFrame):
             self._tts_active = False
+        elif isinstance(frame, BotStartedSpeakingFrame) and self._barged:
+            pass   # the interrupted reply's leftover audio: not a reply to show
+        elif isinstance(frame, BotStoppedSpeakingFrame) and self._barged:
+            self._barged = False   # it has drained; the next speech is a real reply
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._suppress_thinking = False
             if self._follow_up_asked_at is not None and time.monotonic() - self._follow_up_asked_at < 3.0:
