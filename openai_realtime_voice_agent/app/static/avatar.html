@@ -1717,6 +1717,11 @@ function leanBack(ch, dt) {
 const DRAPE_TB = 8, DRAPE_AB = 12;   // a leg's shape: rings along the bone, steps round it
 const DRAPE_MARGIN = 0.025;          // gap kept from the skin, for the cloth between bones
 const DRAPE_MAX = 120;               // furthest a piece is turned up, in degrees
+// How much each piece also just hangs down, against how it hangs standing (1 = as
+// much): lying on her front, the shape it has standing would stick straight up off
+// her; this lays it down on her (the skirt's own physics has next to no gravity).
+const DRAPE_GRAVITY = 1;
+const _ddown = new THREE.Vector3(0, -1, 0);
 function measureLeg(vrm, from, to) {
   const A = vrm.humanoid.getRawBoneNode(from), B = vrm.humanoid.getRawBoneNode(to);
   if (!A || !B) return null;
@@ -1847,7 +1852,7 @@ function drapeSkirt(ch, dt) {
     _dout.copy(c.out).applyQuaternion(_dhq);
     c.segs[0].bone.getWorldPosition(_dfrom);
     for (const s of c.segs) {
-      _d0.copy(s.rest).applyQuaternion(_dhq);
+      _d0.copy(s.rest).applyQuaternion(_dhq).addScaledVector(_ddown, DRAPE_GRAVITY).normalize();
       _dcur.copy(s.tail).applyMatrix4(s.bone.matrixWorld).sub(_dfrom);
       const len = _dcur.length();
       _dcur.divideScalar(len);
