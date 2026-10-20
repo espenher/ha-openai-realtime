@@ -58,7 +58,9 @@
   body.hand:not(.editing) #stage { cursor: none; }
   #touchReadout { position: fixed; left: 12px; bottom: 30px; padding: 6px 10px; border-radius: 8px;
                   background: rgba(0,0,0,.6); font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; }
-  #touchEditor { display: flex; flex-direction: column; gap: 6px; }
+  #touchEditor, #cameraEditor { display: flex; flex-direction: column; gap: 6px; }
+  #cameraEditor .shotName { font-weight: 600; flex: 1; }
+  #cameraEditor .muted { color: var(--muted); font-size: 12px; }
   .touchKind { border: 1px solid var(--line); border-radius: 8px; padding: 6px; margin: 0; display: flex;
                flex-direction: column; gap: 4px; }
   .touchKind legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
@@ -155,15 +157,10 @@
   <div class="row"><label class="btn">Upload files…<input id="upload" type="file" multiple hidden
       accept=".glb,.vrm,.fbx,.vrma,.png,.jpg,.jpeg"></label></div>
 
+  <h2>Camera</h2>
+  <p>The camera picks a shot by itself, from where she is and what's going on, and eases between them.</p>
+  <div id="cameraEditor"></div>
   <h2>Save</h2>
-  <p>The camera picks a shot by itself: wide while she's idle, full body when she's woken or gestures, close-up while
-     she talks. Line up a view and set it as a shot; full body and close-up follow her from that angle.</p>
-  <div class="row"><button id="setWide">Set wide</button><button id="setFull">Set full body</button>
-    <button id="setClose">Set close-up</button></div>
-  <div class="row">Preview <button class="shotPreview" data-shot="wide">Wide</button>
-    <button class="shotPreview" data-shot="full">Full body</button>
-    <button class="shotPreview" data-shot="close">Close-up</button></div>
-  <div class="row"><button id="autoShots">Automatic full body &amp; close-up</button></div>
   <div class="row"><button id="save" class="primary">Save room</button><button id="exitEdit">Done</button></div>
   <p id="saveStatus"></p>
 </div>
@@ -195,6 +192,7 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, VRMLookAtQuaternionProxy, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 import { createTouch } from './static/touch.js';
+import { createShots } from './static/shots.js';
 
 const params = new URLSearchParams(location.search);
 const MOUTH_DELAY = Number(params.get('delay') ?? 450) / 1000;
@@ -791,9 +789,7 @@ function buildActionsUI() {
       fillSelect(anim, [...new Set([a.animation, ...animations].filter(Boolean))], a.animation);
       anim.onchange = () => { a.animation = anim.value; actionsChanged(); };
       const framing = el('select', { title: 'Camera while it plays' });
-      for (const [value, text] of [['full', 'Full body'], ['close', 'Close-up'], ['keep', 'Camera stays']]) {
-        framing.append(el('option', { value, textContent: text }));
-      }
+      for (const [value, text] of shots.choices()) framing.append(el('option', { value, textContent: text }));
       framing.value = a.shot || 'full';
       framing.onchange = () => { a.shot = framing.value; actionsChanged(); };
       const timing = (key, placeholder, title) => {
@@ -1157,6 +1153,7 @@ function listSpots() {
   pick.append(Object.assign(document.createElement('option'), { value: '', textContent: '—' }));
   for (const s of layout.spots || []) pick.append(Object.assign(document.createElement('option'), { value: s.id, textContent: spotLabel(s) }));
   pick.value = selected?.userData.kind === 'spot' ? selected.userData.id : '';
+  if (editing) shots.editorChanged();   // a row per sit spot
 }
 $('spotPick').onchange = e => select(spotsGroup.children.find(m => m.userData.id === e.target.value) || null);
 const homeSpot = () => (layout.spots || []).find(s => s.type === 'home') || (layout.spots || [])[0];
@@ -1198,85 +1195,21 @@ function placeCharacter() {
 
 // Cut straight to the current shot (on load, a new character, leaving the editor).
 function applyViewCamera() {
-  snapCamera = true;
+  shots.snap();
 }
 
-// ---------- camera director ----------
-// Outside the editor the camera picks a shot from what's going on and eases
-// between them: wide (the saved room view) while idle, full body when she's
-// woken or does a gesture, close-up while she talks. Full body and close-up
-// follow her: from an angle saved in the editor (stored relative to her, so it
-// works wherever she stands) or one worked out between her front and the wide view.
-const SHOT_BACK_TO_WIDE_S = 12;   // after a conversation, before easing back out
-const SHOT_MIN_S = 1.5;           // shortest time on a shot, so quick phase flips don't jerk it around
-const camGoalPos = new THREE.Vector3(), camGoalTarget = new THREE.Vector3(), camTarget = new THREE.Vector3();
-let shot = 'wide', shotSince = -Infinity, snapCamera = true, idleSince = -Infinity;
-let gestureShot = null, gestureShotUntil = 0;
-function wantedShot(now) {
-  if (gestureShot && now < gestureShotUntil) return gestureShot;
-  if (active?.away === 'dance' && lastPhase !== 'idle') return 'full';   // the whole dance, even while she talks
-  if (lastPhase === 'replying') return 'close';
-  if (lastPhase === 'listening' || lastPhase === 'thinking') return 'full';
-  return shot !== 'wide' && now - idleSince < SHOT_BACK_TO_WIDE_S ? 'full' : 'wide';
-}
-function shotPose(name, outPos, outTarget) {
-  const wide = layout.camera;
-  if (name === 'wide' || !active) {
-    if (wide) { outPos.fromArray(wide.position); outTarget.fromArray(wide.target); return; }
-    const p = active ? active.root.position : new THREE.Vector3(), h = active ? headHeight(active) : 1.5;
-    outPos.set(p.x, p.y + h * 0.82, p.z + h * 1.55);
-    outTarget.set(p.x, p.y + h * 0.72, p.z);
-    return;
-  }
-  const saved = layout.cameraShots?.[name];
-  if (saved) {
-    active.root.localToWorld(outPos.fromArray(saved.position));
-    active.root.localToWorld(outTarget.fromArray(saved.target));
-    return;
-  }
-  const root = active.root.position, h = headHeight(active);
-  const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(active.root.quaternion);
-  if (wide) {
-    const toWide = new THREE.Vector3().fromArray(wide.position).sub(root).setY(0).normalize();
-    dir.lerp(toWide, 0.5).normalize();
-  }
-  let span;
-  if (name === 'close') {
-    const head = active.vrm.humanoid.getNormalizedBoneNode('head');
-    head ? head.getWorldPosition(outTarget) : outTarget.set(root.x, root.y + h, root.z);
-    outTarget.y += 0.02;
-    span = 0.62;
-  } else {
-    // From her actual head and feet, so a seated pose is framed as well as a standing one.
-    const bone = b => active.vrm.humanoid.getNormalizedBoneNode(b)?.getWorldPosition(new THREE.Vector3());
-    const head = bone('head'), hips = bone('hips'), feet = [bone('leftFoot'), bone('rightFoot')].filter(Boolean);
-    if (head && hips && feet.length) {
-      const top = head.y + 0.2 * active.root.scale.y, bottom = Math.min(...feet.map(f => f.y)) - 0.05;
-      outTarget.set(hips.x, (top + bottom) / 2, hips.z);
-      span = Math.max(0.6, (top - bottom) * 1.15);
-    } else {
-      outTarget.set(root.x, root.y + h * 0.52, root.z);
-      span = h * 1.3;
-    }
-  }
-  const dist = (span / 2) / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-  outPos.copy(outTarget).addScaledVector(dir, dist);
-  outPos.y += span * 0.06;
-}
-function updateDirector(dt, now) {
-  const want = wantedShot(now);
-  if (want !== shot && (snapCamera || now - shotSince >= SHOT_MIN_S)) { shot = want; shotSince = now; }
-  shotPose(shot, camGoalPos, camGoalTarget);
-  if (shot === 'wide') {   // a slow drift so the room doesn't look frozen
-    camGoalPos.x += Math.sin(now * 0.07) * 0.08;
-    camGoalPos.y += Math.sin(now * 0.05 + 1) * 0.03;
-  }
-  const k = snapCamera ? 1 : 1 - Math.exp(-dt * 2.2);
-  camera.position.lerp(camGoalPos, k);
-  camTarget.lerp(camGoalTarget, k);
-  camera.lookAt(camTarget);
-  snapCamera = false;
-}
+// ---------- camera (shots.js): the shots, and which one it uses when ----------
+const shots = createShots({
+  camera, orbit: () => orbit,
+  active: () => active,
+  layout: () => layout,
+  phase: () => lastPhase,
+  spots: () => layout.spots || [],
+  spotLabel: s => spotLabel(s),
+  headHeight: ch => headHeight(ch),
+  status: text => { $('saveStatus').textContent = text; },
+});
+
 // ---------- activities: walking to the chair and sitting ----------
 // The second persona can leave her home spot for the room's sit spot. She turns,
 // walks there in a straight line (an animation with "walk" in its name, played in
@@ -1804,11 +1737,10 @@ function holdBook(ch, weight) {
 // A gesture can ask for its own framing (full body by default) while it plays.
 function frameGesture(ch, name, want, seconds, start) {
   const clip = ch.actions.get(name)?.getClip();
-  if (!clip || want === 'keep') return;
-  gestureShot = want || 'full';
+  if (!clip) return;
   const rest = Math.max(0.5, clip.duration - (Number(start) || 0));
   // As long as it plays: its length (repeating if that's longer than the animation), else the rest of it.
-  gestureShotUntil = performance.now() / 1000 + Math.min(gestureSeconds(seconds) || Math.min(rest, 15), 60);
+  shots.frameGesture(want, Math.min(gestureSeconds(seconds) || Math.min(rest, 15), 60));
 }
 
 // While she listens and talks her head turns toward the camera, on top of the
@@ -2128,8 +2060,7 @@ function setEditing(on) {
   orbit.enabled = on;
   spotsGroup.visible = on;
   if (on) {
-    const target = layout.camera?.target || (active ? toArr(active.root.position.clone().add(new THREE.Vector3(0, headHeight(active) * 0.6, 0))) : [0, 1, 0]);
-    orbit.target.fromArray(target);
+    orbit.target.copy(shots.wideTarget());
     orbit.update();
     refreshFiles();
     buildWardrobeUI();
@@ -2143,6 +2074,7 @@ function setEditing(on) {
     $('charIdleAfter').value = idleAfter();
     [$('charIdleMin').value, $('charIdleMax').value] = idleChange();
     touch.editorOpened();
+    shots.editorChanged();
   } else {
     select(null);
     applyViewCamera();
@@ -2337,33 +2269,6 @@ $('sitHere').onclick = () => {
   if (active && s?.type === 'sit') seatAt(active, s);
 };
 
-$('setWide').onclick = () => {
-  layout.camera = { position: toArr(camera.position), target: toArr(orbit.target) };
-  $('saveStatus').textContent = 'Wide shot set — remember to save.';
-};
-for (const [id, name, label] of [['setFull', 'full', 'Full body'], ['setClose', 'close', 'Close-up']]) {
-  $(id).onclick = () => {
-    if (!active) return;
-    (layout.cameraShots ??= {})[name] = {
-      position: toArr(active.root.worldToLocal(camera.position.clone())),
-      target: toArr(active.root.worldToLocal(orbit.target.clone())),
-    };
-    $('saveStatus').textContent = `${label} shot set — remember to save.`;
-  };
-}
-for (const b of document.querySelectorAll('.shotPreview')) {
-  b.onclick = () => {
-    const pos = new THREE.Vector3(), target = new THREE.Vector3();
-    shotPose(b.dataset.shot, pos, target);
-    camera.position.copy(pos);
-    orbit.target.copy(target);
-    orbit.update();
-  };
-}
-$('autoShots').onclick = () => {
-  delete layout.cameraShots;
-  $('saveStatus').textContent = 'Full body and close-up are automatic again — remember to save.';
-};
 $('save').onclick = async () => {
   const r = await fetch('layout', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(layout) });
   $('saveStatus').textContent = r.ok ? `Saved ${new Date().toLocaleTimeString()}` : `Save failed (${r.status})`;
@@ -2584,7 +2489,6 @@ function onMessage(msg) {
     case 'activity': if (active) followActivity(active, msg.value, false, msg.spot); break;
     case 'persona': showPersona(msg.value); break;
     case 'phase':
-      if (msg.value === 'idle' && lastPhase !== 'idle') idleSince = now;
       quietSince = now;
       lastPhase = msg.value;
       if (active) playFor(active, phaseAnimation(msg.value));
@@ -2650,7 +2554,7 @@ renderer.setAnimationLoop(() => {
   mouth += (target - mouth) * (target > mouth ? 0.55 : 0.25);
 
   roomMixer?.update(dt);
-  if (editing) orbit.update(); else updateDirector(dt, now);
+  if (editing) orbit.update(); else shots.update(dt, now);
   updateSpotItems();
   updateGaze(dt, now);
   updateWallClips();
