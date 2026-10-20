@@ -109,8 +109,10 @@ const DEFAULT_ZONES = [
     stroke: { motion: 'none', moods: ['shy'], told: 'Espen is stroking your hand', speakAfter: 0 },
   })),
 ];
-function zone(id, name, bone, offset, radius, reactions) {
-  return { id, name, bone, offset, radius, reactions };
+// handUpsideDown: the hand turned round on her there (fingers pointing down an upright
+// surface, or back towards you on a flat one).
+function zone(id, name, bone, offset, radius, reactions, handUpsideDown = false) {
+  return { id, name, bone, offset, radius, reactions, handUpsideDown };
 }
 // size: metres (at Size 1); scrollSpeed: 1 = normal; model, texture, bumpMap: media files ('' = none)
 const DEFAULT_HAND = { size: 0.045, scrollSpeed: 1, model: '', texture: '', bumpMap: '' };
@@ -128,7 +130,7 @@ const copy = value => JSON.parse(JSON.stringify(value));
 //   lookAt(point)     where her eyes go (null: back to the page's own choice)
 //   tell(message)     send { told, ongoing, speak } to the add-on (see "reactions")
 //   fromAnimation(bone), layered(bone)  the page's helpers for layering onto her animation
-//   registerEditorKind(kind, { label, selected, moved, removed })  so the editor can select bubbles
+//   registerEditorKind(kind, { label, selected, moved, removed, pickables })  so the editor can select bubbles
 //   selectInEditor(object)  select a bubble in the editor (gizmo on it)
 // }
 export function createTouch(page) {
@@ -463,13 +465,16 @@ export function createTouch(page) {
     }
     closeFingers(grip);
     // Palm towards her when it's close to her, otherwise palm down.
-    const facing = near && near.distance < TURNS_TO_HER_WITHIN + palmGap() ? near.normal : new THREE.Vector3(0, 1, 0);
+    const nearHer = near && near.distance < TURNS_TO_HER_WITHIN + palmGap();
+    const facing = palmFacing(nearHer ? near.normal : new THREE.Vector3(0, 1, 0));
+    if (nearHer && zoneAt(near.point)?.handUpsideDown) facing.multiply(UPSIDE_DOWN);   // that zone wants it turned round
     const k = 1 - Math.exp(-dt * FOLLOW_RATE);
     hand.position.lerp(shown, k);
-    hand.quaternion.slerp(palmFacing(facing), k);
+    hand.quaternion.slerp(facing, k);
     hand.scale.setScalar(handSettings().size / DEFAULT_HAND.size * scale());
     return near;
   }
+  const UPSIDE_DOWN = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);   // about the palm's normal
   function palmFacing(normal) {
     // The palm (the hand's -y) towards the surface. The fingers (-z) point up along an
     // upright surface, like a hand against glass, and away from the camera along a flat
@@ -926,6 +931,7 @@ export function createTouch(page) {
   page.registerEditorKind('touchZone', {
     label: obj => `Touch zone: ${zones().find(z => z.id === obj.userData.id)?.name ?? ''}`,
     selected: obj => { editingId = obj.userData.id; drawEditor(); },
+    pickables: () => bubbles.map(b => b.mesh),   // so clicking one on her picks it
     moved: obj => {
       const z = ownZones().find(z => z.id === obj.userData.id);
       if (!z) return;
@@ -977,6 +983,7 @@ export function createTouch(page) {
       row(textBox(z.name, 'Name', v => { z.name = v; }, () => drawEditor())),
       row('On bone', selectBox(boneNames, z.bone, v => { z.bone = v; rebuild(); page.selectInEditor(bubbleOf(z.id)?.mesh ?? null); })),
       row('Size', numberBox(z.radius, 0.01, v => { z.radius = v; bubbleOf(z.id)?.mesh.scale.setScalar(v); }), 'm'),
+      row(checkBox('The hand upside down here', !!z.handUpsideDown, v => { z.handUpsideDown = v; })),
       row(button('Remove zone', () => removeZone(z.id))),
     );
     for (const kind of KINDS) {
@@ -1063,6 +1070,13 @@ export function createTouch(page) {
     return div;
   }
   function note(text) { return Object.assign(document.createElement('p'), { textContent: text }); }
+  function checkBox(text, checked, onchange) {
+    const label = document.createElement('label');
+    const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked });
+    box.onchange = () => onchange(box.checked);
+    label.append(box, ` ${text}`);
+    return label;
+  }
   function button(text, onclick) { return Object.assign(document.createElement('button'), { textContent: text, onclick }); }
   function selectBox(options, value, onchange) {
     const sel = document.createElement('select');

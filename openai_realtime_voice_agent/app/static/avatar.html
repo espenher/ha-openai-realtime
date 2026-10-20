@@ -2113,8 +2113,7 @@ let editing = false, selected = null;
 // Besides room parts, furniture and spots, the editor can select things other parts of
 // the page register here (touch zones, from touch.js): how to name one in Selected,
 // what to do when it's picked, moved or removed, and where to find them for clicking.
-const editorKinds = new Map();   // kind → { label(obj), selected(obj), moved(obj), removed(obj) }
-const editorPickables = [];      // groups/objects to look in when clicking
+const editorKinds = new Map();   // kind → { label(obj), selected(obj), moved(obj), removed(obj), pickables() }
 const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.enabled = false;
 const gizmo = new TransformControls(camera, renderer.domElement);
@@ -2211,7 +2210,8 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;   // that was a drag
   const pointer = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects([...editorPickables, spotsGroup, itemsGroup, roomGroup], true);
+  const registered = [...editorKinds.values()].flatMap(kind => kind.pickables?.() ?? []);
+  const hits = raycaster.intersectObjects([...registered, spotsGroup, itemsGroup, roomGroup], true);
   const under = [];
   for (const hit of hits) {
     let o = hit.object;
