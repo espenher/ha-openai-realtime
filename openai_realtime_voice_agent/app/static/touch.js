@@ -66,7 +66,6 @@ const KEEP_OUTSIDE_S = 0.25;    // is this many bubble sizes away, or outside it
 
 // The springy parts of a model the hand may push, by their names in the model (and so
 // the editor's tick list). Skirt and chest springs are left out on purpose.
-const SPRINGS_LEFT_OUT = /skirt|breast|bust|chest/i;
 const SPRING_REACH = 1.3;   // the hand pushes springs within this many times its own size
 
 // Where she can be touched, until the layout has its own list. Positions are from the
