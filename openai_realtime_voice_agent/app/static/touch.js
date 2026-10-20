@@ -489,7 +489,6 @@ export function createTouch(page) {
     const chainTop = j => { let b = j.bone; while (springBones.has(b.parent)) b = b.parent; return b; };
     for (const j of joints) {
       const name = springGroupName(chainTop(j));
-      if (SPRINGS_LEFT_OUT.test(name)) continue;
       if (!springGroups.has(name)) springGroups.set(name, []);
       springGroups.get(name).push(j);
     }
