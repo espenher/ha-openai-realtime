@@ -4,8 +4,9 @@
 // screen, the scroll wheel nearer and further. A shadow under it shows how high it is.
 // While it's out the page has the mouse to itself (pointer lock, like a browser game),
 // so the hand can go on moving where the cursor would hit the edge; Esc lets go.
-// She's solid to it: it stops at her body (an invisible shell measured from the model)
-// instead of going through. Resting on her is touching her; a click is a quick pat.
+// She's solid to it: whatever part of her is in front of the hand stops it (an invisible
+// shell measured from the model), so scrolling in presses it onto her, and moving it
+// then rides it over her shape. Resting on her is touching her; a click is a quick pat.
 //
 // Her body has touch zones, each a bubble riding on one of her bones, marking the places
 // that mean something: a touch counts for a zone when the hand is on her overlapping its
@@ -48,8 +49,8 @@ const MOTIONS = ['none', 'lean in', 'flinch'];
 // Flying the hand (the hand's size and the scroll speed are editor settings).
 const NEAREST = 0.25, FURTHEST = 6;  // metres from the camera the hand can be
 const TURNS_TO_HER_WITHIN = 0.15;    // metres: nearer her than this, the palm turns towards her
-const STICKS_WITHIN = 0.03;          // metres: touching her, the hand follows her surface as it's moved
-                                     // unless it's pulled further away than this (the wheel lifts it off)
+const PRESS_DEPTH = 0.04;            // metres: scrolled into her, the hand presses on her (and rides over
+                                     // her as it's moved) up to this much "in" before it stops going deeper
 const FOLLOW_RATE = 20;              // how quickly the hand on screen catches up (per second)
 const PAT_S = 0.3;                   // a click's pat: down and back up in this long...
 const PAT_REACH = 0.08;              // ...reaching this far (metres) towards whatever is nearest
@@ -318,7 +319,6 @@ export function createTouch(page) {
   let handOn = false, pointerInside = false;
   const handAt = new THREE.Vector3();   // where you've flown it (the hand on screen follows, plus any pat)
   let pat = null;                       // a click's pat: { since }
-  let touchingHer = false;              // last frame's: the hand was on her (it then sticks to her surface)
   let lastPointer = null;
   const ray = new THREE.Raycaster();
 
@@ -378,21 +378,8 @@ export function createTouch(page) {
     const distance = handAt.distanceTo(page.camera.position);
     moveHandBy(forward.multiplyScalar(-e.deltaY * 0.0012 * handSettings().scrollSpeed * distance));
   }, { passive: false });
-  // Moves it, stopping where it would run into her (a wheel step can be longer than
-  // she is thick, so checking only where it ends up would let it through).
-  function moveHandBy(delta) {
-    const length = delta.length();
-    if (length < 1e-6) return;
-    const direction = delta.clone().divideScalar(length);
-    if (page.active()) {
-      ray.set(handAt, direction);
-      ray.far = length + handRadius();
-      const hit = ray.intersectObjects(shell.map(s => s.mesh), false)[0];
-      ray.far = Infinity;
-      if (hit) { handAt.addScaledVector(direction, Math.max(0, hit.distance - handRadius())); return; }
-    }
-    handAt.add(delta);
-  }
+  // Where you've moved it to; she's in the way of that each frame (see fly).
+  function moveHandBy(delta) { handAt.add(delta); }
   page.canvas.addEventListener('pointerdown', e => {
     if (!handOn || page.editing() || e.button !== 0) return;
     if (!mouseLocked()) lockMouse();
@@ -412,19 +399,35 @@ export function createTouch(page) {
   function fly(dt, now) {
     hand.visible = handOn && pointerInside && hand.userData.placed && !page.editing();
     if (!hand.visible) return null;
-    // Keep it within reach of the camera, and out of her: it stops at her body.
-    const fromCamera = handAt.clone().sub(page.camera.position);
-    const distance = THREE.MathUtils.clamp(fromCamera.length(), NEAREST, FURTHEST);
-    handAt.copy(page.camera.position).addScaledVector(fromCamera.normalize(), distance);
-    let near = page.active() ? nearestOnHer(handAt) : null;
-    // Solid: it stops at her body. Already touching, it slides along her as you move it.
-    const holdsOn = touchingHer && near && near.distance < handRadius() + STICKS_WITHIN * scale();
-    if (near && (near.distance < handRadius() || holdsOn)) {
-      handAt.copy(near.point).addScaledVector(near.normal, handRadius());
-      near = nearestOnHer(handAt);
+    // Keep it within reach of the camera.
+    const camera = page.camera.position;
+    const sight = handAt.clone().sub(camera);
+    const depth = THREE.MathUtils.clamp(sight.length(), NEAREST, FURTHEST);
+    sight.normalize();
+    handAt.copy(camera).addScaledVector(sight, depth);
+    // Solid: the part of her in front of the hand (along your line of sight) stops it
+    // there. Scrolled in further, it's pressing on her, so moving it rides it over her;
+    // it never gets more than PRESS_DEPTH "in", or moving off her edge would drop it
+    // behind her. Nothing pulls it towards her otherwise.
+    const shown = handAt.clone();
+    if (page.active()) {
+      ray.set(camera, sight);
+      ray.far = depth + handRadius();
+      const hit = ray.intersectObjects(shell.map(s => s.mesh), false)[0];
+      ray.far = Infinity;
+      const stop = hit ? hit.distance - handRadius() : Infinity;
+      if (depth > stop) {
+        shown.copy(camera).addScaledVector(sight, Math.max(NEAREST, stop));
+        if (depth > stop + PRESS_DEPTH * scale()) handAt.copy(camera).addScaledVector(sight, stop + PRESS_DEPTH * scale());
+      }
+    }
+    // She can also move into it herself: out to her surface then.
+    let near = page.active() ? nearestOnHer(shown) : null;
+    if (near && near.distance < handRadius()) {
+      shown.copy(near.point).addScaledVector(near.normal, handRadius());
+      near = nearestOnHer(shown);
     }
     // A click's pat: a quick dip towards her (or straight ahead), and back.
-    const shown = handAt.clone();
     if (pat) {
       const t = (now - pat.since) / PAT_S;
       if (t >= 1) pat = null;
@@ -536,7 +539,6 @@ export function createTouch(page) {
   let lastSensed = null;   // for looking in from the console (touch.state)
   function sense(near, now) {
     const touching = near && hand.visible && hand.position.distanceTo(near.point) <= handRadius() + TOUCHING_WITHIN * scale() + 0.005;
-    touchingHer = !!touching;
     lastSensed = { near: near && { distance: +near.distance.toFixed(3), point: near.point.toArray().map(v => +v.toFixed(3)) },
                    handToPoint: near ? +hand.position.distanceTo(near.point).toFixed(3) : null, touching: !!touching,
                    zone: touching ? zoneAt(near.point)?.name ?? null : null, contact: contact?.zone.name ?? null };
