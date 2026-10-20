@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import struct
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -174,7 +175,13 @@ def describe_spot(spot: dict | None, layout: dict) -> str:
 
 
 def describe_activity(layout: dict | None = None) -> str:
-    """Whether she's standing, sitting (and how) or dancing, as the avatar page last reported it."""
+    """What she's doing, as the avatar page last reported it: standing, sitting (and how)
+    or dancing, and anything the hand on the page is doing to her."""
+    return " ".join(filter(None, [describe_posture(layout), describe_touch()]))
+
+
+def describe_posture(layout: dict | None = None) -> str:
+    """Whether she's standing, sitting (and how) or dancing."""
     layout = load_layout() if layout is None else layout
     if HUB.activity == "sitting":
         spot = next((s for s in layout.get("spots") or [] if s.get("id") == HUB.spot), None)
@@ -183,6 +190,23 @@ def describe_activity(layout: dict | None = None) -> str:
         return "You're dancing."
     if any(spot.get("type") == "sit" for spot in layout.get("spots") or []) or _can_dance(layout):
         return "You're standing on your spot."
+    return ""
+
+
+# How long after a touch is over she's still told about it ("a moment ago").
+TOUCH_NOTE_S = 60
+
+
+def describe_touch() -> str:
+    """What the hand on the avatar page is doing to her now, or did a moment ago (the
+    zone's "told" text from the editor's Touch section)."""
+    touch = HUB.touch
+    if not touch:
+        return ""
+    if touch["ongoing"]:
+        return f"Right now, on your screen: {touch['told']}."
+    if time.monotonic() - touch["at"] < TOUCH_NOTE_S:
+        return f"A moment ago, on your screen: {touch['told']}."
     return ""
 
 

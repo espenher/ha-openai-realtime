@@ -37,6 +37,7 @@ import math
 import pathlib
 import re
 import shutil
+import time
 from array import array
 
 from aiohttp import WSMsgType, web
@@ -134,6 +135,12 @@ class AvatarHub:
         # when the editor saves new moods/gestures, and when she sits, stands or dances.
         self.on_layout_saved = None
         self.on_activity = None
+        # What the hand on the avatar page (touch.js) is doing to her, or last did:
+        # {"told": "Espen has a hand on your head", "ongoing": bool, "at": monotonic}.
+        # on_touch(speak) is set by the websocket handler: it updates her notes and,
+        # when the zone says so (speak), has her react out loud.
+        self.touch = None
+        self.on_touch = None
 
     @property
     def activity(self) -> str:
@@ -300,7 +307,12 @@ class AvatarHub:
             msg = json.loads(data)
         except ValueError:
             return
-        if not isinstance(msg, dict) or msg.get("type") != "activity":
+        if not isinstance(msg, dict):
+            return
+        if msg.get("type") == "touch":
+            self._touched(msg)
+            return
+        if msg.get("type") != "activity":
             return
         value = msg.get("value")
         spot = msg.get("spot") if value == "sitting" and isinstance(msg.get("spot"), str) else None
@@ -310,6 +322,18 @@ class AvatarHub:
         self.send({"type": "activity", "value": value, "spot": spot})
         if self.on_activity:
             asyncio.create_task(self.on_activity())
+
+    def _touched(self, msg: dict) -> None:
+        """The hand on the page touched her: {"told", "ongoing", "speak"} (see touch.js, reactions)."""
+        told = msg.get("told")
+        if not isinstance(told, str) or not told.strip():
+            return
+        self.touch = {"told": told.strip()[:200], "ongoing": bool(msg.get("ongoing")), "at": time.monotonic()}
+        speak = bool(msg.get("speak"))
+        logger.info(f"🖐 {self.touch['told']}" + (" (going on)" if self.touch["ongoing"] else "")
+                    + (" → she says something" if speak else ""))
+        if self.on_touch:
+            asyncio.create_task(self.on_touch(speak))
 
     # ---------- sending ----------
     @property

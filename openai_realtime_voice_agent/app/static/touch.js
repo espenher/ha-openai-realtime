@@ -15,8 +15,13 @@
 // says what it means to her: how she moves, the moods she goes through, what she's told,
 // and when she says something about it.
 //
+// What a touch does to her is the zone's to say too (see "reactions"): her face, her
+// head leaning in or flinching, what she's told (the add-on puts it in her notes), and
+// when she says something about it out loud. While the hand is on her she looks at it.
+//
 // The hand also pushes the springy parts of her model (hair, ribbons, tie...), the ones
-// ticked in the editor.
+// ticked in the editor. It can be the simple built-in hand or a model of your own (a
+// glove, say) from the media folder, picked in the editor.
 //
 // It's all kept in the layout (layout.touch) and edited in the room editor's Touch
 // section, which this file draws.
@@ -24,17 +29,22 @@
 // The parts, in order below:
 //   zones     the zone list (the layout's, or the defaults) and the bubbles on her bones
 //   shell     her body's shape, measured from the model: what the hand stops at
-//   hand      the hand model and flying it about (mouse, scroll wheel, click to pat)
+//   hand      flying the hand about (mouse, scroll wheel, click to pat)
+//   hand model  the simple hand, or a model from the media folder
 //   shadow    the spot under the hand that shows how high it is
 //   springs   which of her springy parts the hand pushes
 //   sensing   which zone the hand is on, and whether that's a poke, touch or stroke
-//   readout   a line on screen saying what she feels (until the reactions are in)
+//   reactions what a touch does to her: moods, leaning in or flinching, telling her
+//   readout   a line on screen saying what she feels (handy while setting zones up)
 //   editor    the Touch section of the room editor
 //
-// The page starts it with createTouch(page) and calls update(dt) every frame. `page`
-// gives it what it needs from the page: see the comment at createTouch.
+// The page starts it with createTouch(page), calls update(dt) every frame, and pose(ch, dt)
+// where it layers things onto her animation. `page` gives it what it needs from the
+// page: see the comment at createTouch.
 
 import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMSpringBoneCollider, VRMSpringBoneColliderShapeSphere } from '@pixiv/three-vrm';
 
 // ---------- settings ----------
@@ -60,15 +70,17 @@ const PAT_REACH = 0.08;              // ...reaching this far (metres) towards wh
 // Telling touches apart.
 const TOUCHING_WITHIN = 0.015;  // metres between hand and skin that still counts as touching
 const POKE_MAX_S = 0.3;         // a touch shorter than this is a poke
-const STROKE_SPEED = 0.1;       // metres a second across the zone (at Size 1): faster is a stroke
+const STROKE_SPEED = 0.1;       // metres a second you move the hand (at Size 1): faster is a stroke
 const SPEED_OVER_S = 0.3;       // ...measured over this long
+const STROKE_KEEP_S = 0.8;      // a stroke carries on through slowing down (turning back) for this long
 const REPEAT_WINDOW_S = 4;      // pokes on a zone closer together than this count as repeats
 const KEEP_WITHIN = 1.5;        // a touch starts inside the bubble, then carries on until the hand
 const KEEP_OUTSIDE_S = 0.25;    // is this many bubble sizes away, or outside it this long
 
 // The springy parts of a model the hand may push, by their names in the model (and so
 // the editor's tick list). Skirt and chest springs are left out on purpose.
-const SPRING_REACH = 1.3;   // the hand pushes springs within this many times its own size
+const SPRING_REACH = 1.3;   // the hand pushes springs within this many times its own size: her shell
+                            // covers the hair near her head, so the hand rests on the hair's surface
 
 // Where she can be touched, until the layout has its own list. Positions are from the
 // bone, in her own directions at Size 1: x to her left, y up, z forward (metres).
@@ -99,7 +111,8 @@ const DEFAULT_ZONES = [
 function zone(id, name, bone, offset, radius, reactions) {
   return { id, name, bone, offset, radius, reactions };
 }
-const DEFAULT_HAND = { size: 0.045, scrollSpeed: 1 };   // metres (at Size 1); 1 = normal
+// size: metres (at Size 1); scrollSpeed: 1 = normal; model, texture, bumpMap: media files ('' = none)
+const DEFAULT_HAND = { size: 0.045, scrollSpeed: 1, model: '', texture: '', bumpMap: '' };
 const copy = value => JSON.parse(JSON.stringify(value));
 
 // page: {
@@ -109,6 +122,11 @@ const copy = value => JSON.parse(JSON.stringify(value));
 //   editing()         whether the room editor is open
 //   moodTags()        the mood tags from the editor's Moods & gestures list
 //   pickables()       the room and furniture (for placing the hand and its shadow)
+//   files()           the media folder's file names (for picking a hand model)
+//   setMood(tag, seconds)  put on a mood from the Moods & gestures list for a while
+//   lookAt(point)     where her eyes go (null: back to the page's own choice)
+//   tell(message)     send { told, ongoing, speak } to the add-on (see "reactions")
+//   fromAnimation(bone), layered(bone)  the page's helpers for layering onto her animation
 //   registerEditorKind(kind, { label, selected, moved, removed })  so the editor can select bubbles
 //   selectInEditor(object)  select a bubble in the editor (gizmo on it)
 // }
@@ -184,9 +202,9 @@ export function createTouch(page) {
 
   // ---------- shell ----------
   // Her body's shape for the hand: a rounded tube along each limb and body bone and an
-  // egg shape for her head, each as thick as the model is there (clothes too, but not
-  // hair: a hand goes into hair down to her head, pushing the strands), measured once
-  // per model. The hand stops at it, and the shadow falls on it.
+  // egg shape for her head (hair near the head included), each as thick as the model is
+  // there (clothes too), measured once per model. The hand stops at it, and the shadow
+  // falls on it.
   const SHELL_BONES = [   // [bone, the bone it reaches to]; null: an egg shape (the head)
     ['hips', 'spine'], ['spine', 'chest'], ['chest', 'neck'], ['neck', 'head'], ['head', null],
     ...['left', 'right'].flatMap(side => [
@@ -194,6 +212,7 @@ export function createTouch(page) {
       [`${side}UpperLeg`, `${side}LowerLeg`], [`${side}LowerLeg`, `${side}Foot`], [`${side}Foot`, `${side}Toes`],
     ]),
   ];
+  const HAIR_REACH = 0.22;   // metres from the head bone (at Size 1) that hair still counts as head
   const shellMaterial = new THREE.MeshBasicMaterial({ visible: false });
   const shellSizes = new Map();  // model uuid → [{ bone, to, radius } | { bone, center, size }] (bone frames, Size 1)
   let shell = [];                // [{ part, node, mesh }] on the character on screen
@@ -223,9 +242,9 @@ export function createTouch(page) {
   }
   // How thick she is around each bone: the skin (and clothes) mostly moved by that
   // bone, measured from the bone's line (most of the way out, not the furthest stray
-  // point). The head is fitted to the outer edges of the head instead: the face has far
-  // more points than the top of the head, which a "most of the way out" measure would
-  // leave sticking out. In each bone's own frame, so the pose doesn't matter.
+  // point). The head is fitted to the outer edges of head and hair instead: the face
+  // has far more points than the top of the head, which a "most of the way out" measure
+  // would leave sticking out. In each bone's own frame, so the pose doesn't matter.
   function measureShell(ch) {
     const h = ch.vrm.humanoid;
     const parts = SHELL_BONES
@@ -234,6 +253,12 @@ export function createTouch(page) {
       .filter(p => p.raw && p.node && (p.to === null || p.toNode));
     const byRaw = new Map(parts.map(p => [p.raw, { ...p, points: [] }]));
     ch.root.updateMatrixWorld(true);
+    // Hair hangs from bones of its own under the head; what's near the head counts as
+    // head (the twin tails reaching down her back don't).
+    const head = byRaw.get(h.getRawBoneNode('head'));
+    const headAt = head?.raw.getWorldPosition(new THREE.Vector3());
+    const nearHead = HAIR_REACH * ch.root.scale.y;
+    const underHead = bone => { for (let b = bone?.parent; b; b = b.parent) if (b === head?.raw) return !byRaw.has(bone); return false; };
     const v = new THREE.Vector3();
     ch.vrm.scene.traverse(m => {
       if (!m.isSkinnedMesh || !m.visible) return;
@@ -241,8 +266,13 @@ export function createTouch(page) {
       for (let i = 0; i < skinIndex.count; i += 3) {   // every third vertex is plenty
         let best = 0, bone = -1;
         for (let k = 0; k < 4; k++) if (skinWeight.getComponent(i, k) > best) { best = skinWeight.getComponent(i, k); bone = skinIndex.getComponent(i, k); }
-        const part = byRaw.get(m.skeleton.bones[bone]);
+        const owner = m.skeleton.bones[bone];
+        const part = byRaw.get(owner);
         if (part) part.points.push(m.getVertexPosition(i, v).applyMatrix4(m.matrixWorld).clone());
+        else if (head && underHead(owner)) {
+          const at = m.getVertexPosition(i, v).applyMatrix4(m.matrixWorld);
+          if (at.distanceTo(headAt) < nearHead) head.points.push(at.clone());
+        }
       }
     });
     const sizes = [];
@@ -301,7 +331,10 @@ export function createTouch(page) {
   }
 
   // ---------- hand ----------
-  const hand = buildHand();
+  // `hand` is what flies about; the simple hand or a model is in it (see "hand model").
+  const hand = new THREE.Group();
+  const simpleHand = buildHand();
+  hand.add(simpleHand);
   hand.visible = false;
   page.scene.add(hand);
   let handOn = false, pointerInside = false;
@@ -452,6 +485,107 @@ export function createTouch(page) {
     return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(side, up, back));
   }
 
+  // ---------- hand model ----------
+  // The hand can be a model from the media folder instead of the simple one: an FBX or
+  // GLB with a rigged right hand (a glove, say; a pair shows just the right one), with
+  // the texture and bump map picked in the editor. It's turned so its palm faces down
+  // and its fingers point ahead, sized to the hand's Size, and its fingers curled a
+  // little, at rest. Without a model, or if it won't load, the simple hand is used.
+  const FINGER_CURL = [8, 14, 10];   // degrees at each finger's three joints, towards the palm
+  const HAND_LENGTH = 0.15;          // metres from wrist to fingertip, at the default Size
+  const HAND_GLOW = 0x1c1c22;        // a little light of its own, so a dark glove shows in a dim room
+  const RIGHT = /(^|[_.\s-])r$|right/i;
+  let modelShown = '', modelLoading = null;   // which settings the model on screen was made from
+
+  function updateHandModel() {
+    const { model, texture, bumpMap } = handSettings();
+    const wanted = model ? JSON.stringify([model, texture, bumpMap]) : '';
+    if (wanted === modelShown || wanted === modelLoading) return;
+    modelLoading = wanted;
+    loadHandModel(model, texture, bumpMap).then(obj => {
+      if (modelLoading !== wanted) return;   // changed again while it loaded
+      for (const child of [...hand.children]) if (child !== simpleHand) child.removeFromParent();
+      if (obj) hand.add(obj);
+      simpleHand.visible = !obj;
+      modelShown = wanted;
+      modelLoading = null;
+    });
+  }
+  async function loadHandModel(model, texture, bumpMap) {
+    if (!model) return null;
+    const url = name => `files/${encodeURIComponent(name)}`;
+    try {
+      const loaded = /\.glb$/i.test(model) ? (await new GLTFLoader().loadAsync(url(model))).scene
+        : await new FBXLoader().loadAsync(url(model));
+      const textures = new THREE.TextureLoader();
+      const map = texture ? await textures.loadAsync(url(texture)) : null;
+      if (map) map.colorSpace = THREE.SRGBColorSpace;
+      const normalMap = bumpMap ? await textures.loadAsync(url(bumpMap)) : null;
+      return fitHandModel(loaded, map, normalMap);
+    } catch (e) {
+      console.warn(`touch: couldn't use ${model} as the hand`, e);
+      return null;
+    }
+  }
+  // Into the simple hand's frame (see buildHand): the palm's middle at the origin, the
+  // little finger towards +x, the back of the hand up (+y), the fingers ahead (-z).
+  function fitHandModel(loaded, map, normalMap) {
+    loaded.updateMatrixWorld(true);
+    const meshes = [];
+    loaded.traverse(o => { if (o.isMesh) meshes.push(o); });
+    const right = meshes.find(m => RIGHT.test(m.name)) ?? meshes[0];
+    if (!right) throw new Error('there is no mesh in it');
+    for (const m of meshes) m.visible = m === right;
+    if (map || normalMap) {
+      right.material = new THREE.MeshStandardMaterial({ map, normalMap, roughness: 0.5, metalness: 0.05, emissive: HAND_GLOW });
+    }
+    right.renderOrder = 5;
+    right.frustumCulled = false;   // a skinned mesh's bounds don't follow it about
+    const holder = new THREE.Group();
+    holder.add(loaded);
+    // Where its hand is, from its bones: the wrist, and the first joints of the
+    // middle, index and little fingers.
+    const bones = right.skeleton?.bones ?? [];
+    const bone = pattern => bones.find(b => pattern.test(b.name) && RIGHT.test(b.name)) ?? bones.find(b => pattern.test(b.name));
+    const wrist = bone(/hand|wrist/i), middle = bone(/middle.*(1|proximal)/i);
+    const index = bone(/index.*(1|proximal)/i), little = bone(/(pinky|little).*(1|proximal)/i);
+    if (!wrist || !middle || !index || !little) {
+      console.warn('touch: the hand model has no wrist and finger bones I recognise, so it is shown as it is');
+      return holder;
+    }
+    const at = b => b.getWorldPosition(new THREE.Vector3());
+    const ahead = at(middle).sub(at(wrist));   // wrist to knuckles
+    const knuckles = ahead.length();
+    ahead.normalize();
+    const x = at(little).sub(at(index));       // across, towards the little finger
+    x.addScaledVector(ahead, -x.dot(ahead)).normalize();
+    const z = ahead.clone().negate();
+    const y = new THREE.Vector3().crossVectors(z, x);
+    curlFingers(bone, x);
+    const palm = at(wrist).lerp(at(middle), 0.5);
+    const frame = new THREE.Matrix4().makeBasis(x, y, z).setPosition(palm).invert();
+    const size = HAND_LENGTH / (knuckles * 2.1);   // wrist to knuckles is a bit under half the hand
+    new THREE.Matrix4().makeScale(size, size, size).multiply(frame).multiply(loaded.matrix)
+      .decompose(loaded.position, loaded.quaternion, loaded.scale);
+    return holder;
+  }
+  // Each finger's joints turned towards the palm (about the across direction, x).
+  function curlFingers(bone, across) {
+    const fingers = ['index', 'middle', 'ring', '(pinky|little)'];
+    const joints = [['1', 'proximal'], ['2', 'intermediate'], ['3', 'distal']];
+    const turn = new THREE.Quaternion(), parent = new THREE.Quaternion(), world = new THREE.Quaternion();
+    for (const finger of fingers) {
+      joints.forEach(([n, word], i) => {
+        const b = bone(new RegExp(`${finger}.*(${n}|${word})`, 'i'));
+        if (!b?.parent) return;
+        turn.setFromAxisAngle(across, -THREE.MathUtils.degToRad(FINGER_CURL[i]));
+        b.parent.getWorldQuaternion(parent).invert();
+        b.quaternion.copy(parent.multiply(turn.multiply(b.getWorldQuaternion(world))));
+        b.updateMatrixWorld(true);
+      });
+    }
+  }
+
   // ---------- shadow ----------
   // A soft dark spot on whatever is straight under the hand: smaller and darker the
   // closer the hand gets, which is how you can tell its height on a flat screen.
@@ -523,10 +657,11 @@ export function createTouch(page) {
   // ---------- sensing ----------
   // A contact is the hand on her inside a zone. It starts strictly inside the bubble,
   // then carries on while the hand stays near (a stroke runs over the edge now and
-  // then). While it lasts it's a touch or a stroke, by how fast the hand moves across
-  // the zone; over within POKE_MAX_S, it was a poke.
+  // then). While it lasts it's a touch or a stroke, by how fast you move the hand;
+  // over within POKE_MAX_S, it was a poke.
   const listeners = [];
-  let contact = null;           // { zone, since, lastInside, kind, trail: [{ t, at }] }  (at: in the bone's frame)
+  let contact = null;           // { zone, since, lastInside, kind, strokeUntil, trail: [{ t, at, normal }] }
+                                // (at: where you're steering the hand; normal: her surface's, there)
   const lastPokes = new Map();  // zone id → { at, count }
 
   let lastSensed = null;   // for looking in from the console (touch.state)
@@ -547,11 +682,11 @@ export function createTouch(page) {
       if (z) contact = { zone: z, since: now, lastInside: now, kind: null, trail: [] };
     }
     if (!contact || !point) return;
-    const at = bubbleOf(contact.zone.id).mesh.parent.worldToLocal(point.clone());
-    contact.trail.push({ t: now, at });
+    contact.trail.push({ t: now, at: handAt.clone(), normal: near.normal.clone() });
     while (contact.trail.length > 2 && now - contact.trail[0].t > SPEED_OVER_S) contact.trail.shift();
     if (now - contact.since < POKE_MAX_S) return;      // could still turn out to be a poke
-    const kind = speedOf(contact.trail) > STROKE_SPEED ? 'stroke' : 'touch';
+    if (speedOf(contact.trail) > STROKE_SPEED) contact.strokeUntil = now + STROKE_KEEP_S;
+    const kind = now < (contact.strokeUntil ?? 0) ? 'stroke' : 'touch';
     if (kind !== contact.kind) {
       if (contact.kind) emit({ zone: contact.zone, kind: contact.kind, phase: 'end', seconds: now - contact.since });
       contact.kind = kind;
@@ -575,15 +710,97 @@ export function createTouch(page) {
   function speedOf(trail) {
     if (trail.length < 2) return 0;
     let travel = 0;
-    for (let i = 1; i < trail.length; i++) travel += trail[i].at.distanceTo(trail[i - 1].at);
+    const step = new THREE.Vector3();
+    for (let i = 1; i < trail.length; i++) {
+      step.subVectors(trail[i].at, trail[i - 1].at);
+      travel += step.addScaledVector(trail[i].normal, -step.dot(trail[i].normal)).length();   // along her, not into her
+    }
     const span = trail[trail.length - 1].t - trail[0].t;
-    // Measured in the bone's own frame, which is at Size 1 whatever her Size.
-    return span > 0 ? travel / span : 0;
+    // How fast you move the hand over her: not onto her (landing isn't stroking), and not
+    // her moving under it (nor is leaning in). At Size 1.
+    return span > 0 ? travel / span / scale() : 0;
   }
   function emit(event) { for (const listen of listeners) listen(event); }
 
+  // ---------- reactions ----------
+  // What a touch does to her, from the zone's settings for that kind of touch:
+  //   moods       her face goes through them in order: the next one with each poke in
+  //               a row, or every MOOD_STEP_S while a touch or stroke goes on
+  //   motion      "lean in": her head tilts towards the hand while it's on her (for a
+  //               poke, a moment); "flinch": a quick pull away as it starts
+  //   told        what she's told: the add-on puts it in her "Right now" notes while it
+  //               goes on, and for a minute after
+  //   speakAfter  she says something about it out loud after this many pokes in a row,
+  //               or this many seconds of touching (once per touch); 0 = never
+  // While the hand is on her she looks at it (see update).
+  const MOOD_STEP_S = 4;      // seconds per mood while a touch goes on
+  const MOOD_HOLD_S = 3;      // how long a mood stays after the touch
+  const LEAN_ANGLE = 12;      // degrees her head tilts towards the hand, leaning in
+  const LEAN_POKE_S = 0.6;    // how long a poke's lean lasts
+  const FLINCH_ANGLE = 15;    // degrees she pulls away, flinching...
+  const FLINCH_S = 0.45;      // ...there and back in this long
+  let leanUntil = 0, leaning = 0, flinchSince = -Infinity, spokeThisTouch = false;
+
+  listeners.push(react);
+  function react(e) {
+    const r = e.zone.reactions?.[e.kind];
+    if (!r) return;
+    const now = performance.now() / 1000;
+    const moods = (r.moods ?? []).filter(Boolean);
+    const speakAfter = Number(r.speakAfter) || 0;
+    if (e.kind === 'poke') {
+      if (moods.length) page.setMood(moods[Math.min(e.repeats, moods.length) - 1], MOOD_HOLD_S);
+      if (r.motion === 'lean in') leanUntil = now + LEAN_POKE_S;
+      if (r.motion === 'flinch') flinchSince = now;
+      tell(r.told + (e.repeats > 1 ? ` (${e.repeats} times in a row)` : ''), false, speakAfter > 0 && e.repeats === speakAfter);
+      return;
+    }
+    if (e.phase === 'end') { tell(r.told, false, false); return; }
+    if (e.phase === 'start') {
+      spokeThisTouch = false;
+      if (r.motion === 'flinch') flinchSince = now;
+      tell(r.told, true, false);
+    }
+    if (moods.length) page.setMood(moods[Math.min(Math.floor(e.seconds / MOOD_STEP_S), moods.length - 1)], MOOD_HOLD_S);
+    if (r.motion === 'lean in') leanUntil = now + 0.25;   // kept up while the touch goes on
+    if (!spokeThisTouch && speakAfter > 0 && e.seconds >= speakAfter) {
+      spokeThisTouch = true;
+      tell(r.told, true, true);
+    }
+  }
+  function tell(told, ongoing, speak) {
+    if (told?.trim()) page.tell({ told: told.trim(), ongoing, speak });
+  }
+
+  // Her head leaning in or flinching: the neck turned towards the hand (or away),
+  // layered onto her animation like the page's own changes to her pose.
+  function pose(ch, dt) {
+    if (ch !== page.active()) return;
+    const neck = ch.vrm.humanoid.getNormalizedBoneNode('neck'), head = ch.vrm.humanoid.getNormalizedBoneNode('head');
+    if (!neck || !head) return;
+    page.fromAnimation(neck);
+    const now = performance.now() / 1000;
+    leaning += ((now < leanUntil ? 1 : 0) - leaning) * Math.min(1, dt * 5);
+    const f = (now - flinchSince) / FLINCH_S;
+    const degrees = leaning * LEAN_ANGLE - (f < 1 ? Math.sin(Math.PI * f) : 0) * FLINCH_ANGLE;   // below 0: away
+    if (Math.abs(degrees) < 0.1) return;
+    neck.updateWorldMatrix(true, false);
+    head.updateWorldMatrix(false, false);
+    const from = neck.getWorldPosition(new THREE.Vector3());
+    const up = head.getWorldPosition(new THREE.Vector3()).sub(from).normalize();
+    const toward = hand.position.clone().sub(from).normalize();
+    const axis = new THREE.Vector3().crossVectors(up, toward);
+    if (axis.lengthSq() < 1e-8) return;
+    // Leaning in turns her at most until she's facing it.
+    const angle = Math.min(Math.abs(THREE.MathUtils.degToRad(degrees)), up.angleTo(toward)) * Math.sign(degrees);
+    const turn = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), angle);
+    const parent = neck.parent.getWorldQuaternion(new THREE.Quaternion()).invert();
+    neck.quaternion.copy(parent.multiply(turn.multiply(neck.getWorldQuaternion(new THREE.Quaternion()))));
+    page.layered(neck);
+  }
+
   // ---------- readout ----------
-  // Until her reactions are in, a line on screen says what she feels.
+  // A line on screen says what she feels (handy while setting zones up).
   const readout = document.createElement('div');
   readout.id = 'touchReadout';
   document.body.append(readout);
@@ -698,6 +915,10 @@ export function createTouch(page) {
       heading('The hand'),
       row('Size', numberBox(h.size, 0.005, v => set('size', Math.max(0.01, v))), 'm', '(for bumping into her and her hair)'),
       row('Scroll speed', numberBox(h.scrollSpeed, 0.1, v => set('scrollSpeed', v)), '(1 = normal)'),
+      row('Model', mediaBox(/\.(fbx|glb)$/i, '(simple hand)', h.model, v => set('model', v))),
+      row('Texture', mediaBox(/\.(png|jpe?g|webp)$/i, '(none)', h.texture, v => set('texture', v))),
+      row('Bump map', mediaBox(/\.(png|jpe?g|webp)$/i, '(none)', h.bumpMap, v => set('bumpMap', v))),
+      note('A model of a rigged right hand (or a pair, of which the right is used) from the media folder.'),
     );
   }
   function addZone() {
@@ -745,6 +966,10 @@ export function createTouch(page) {
     sel.onchange = () => onchange(sel.value);
     return sel;
   }
+  // A pick from the media folder's files matching `pattern`; `none` (the first choice) is ''.
+  function mediaBox(pattern, none, value, onchange) {
+    return selectBox([none, ...page.files().filter(f => pattern.test(f))], value || none, v => onchange(v === none ? '' : v));
+  }
   function textBox(value, placeholder, oninput, onchange, className) {
     const box = Object.assign(document.createElement('input'), { type: 'text', value, placeholder });
     if (className) box.className = className;
@@ -765,7 +990,9 @@ export function createTouch(page) {
     if (page.editing() && mouseLocked()) document.exitPointerLock();
     if (page.active() !== builtFor || zones() !== builtFrom) rebuild();
     for (const { mesh } of bubbles) mesh.visible = page.editing();
+    updateHandModel();
     const near = fly(dt, now);
+    page.lookAt(contact && hand.visible ? hand.position : null);
     castShadow();
     updateSprings();
     sense(near, now);
@@ -774,10 +1001,17 @@ export function createTouch(page) {
 
   return {
     update,
+    pose,
     setHand,
     get handOn() { return handOn; },
     get state() { return lastSensed; },          // what the hand is near and touching (for checking)
-    placeHandAt: point => { handAt.copy(point); hand.position.copy(point); hand.userData.placed = true; pointerInside = true; },   // (for checking)
+    // (for checking) aim the hand at a point, as the mouse would: she still stops it
+    placeHandAt: point => {
+      handAt.copy(point);
+      if (!hand.userData.placed) hand.position.copy(point);
+      hand.userData.placed = true;
+      pointerInside = true;
+    },
     onFeel: listen => listeners.push(listen),   // (event) → { zone, kind, phase, seconds | repeats }
     editorOpened: drawEditor,
   };

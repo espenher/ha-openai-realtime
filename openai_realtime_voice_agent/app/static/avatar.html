@@ -2474,6 +2474,14 @@ function onTag(ch, tag) {
   }
   else setMood(ch, action);
 }
+// A mood from a touch (touch.js): on for `seconds` (kept up while the touch goes on).
+function touchMood(ch, tag, seconds) {
+  const action = findAction(tag) || findAction(MOOD_ALIASES[normTag(tag)]);
+  if (!action || action.kind === 'gesture') return;
+  const changed = ch.mood !== action.tag;
+  if (changed) setMood(ch, action);
+  if (changed || ch.moodUntil !== Infinity) ch.moodUntil = performance.now() / 1000 + seconds;
+}
 function setMood(ch, action) {
   const em = ch.vrm.expressionManager;
   const face = (action.face || []).filter(([name]) => em?.getExpression(name));
@@ -2535,6 +2543,7 @@ scene.add(gaze);
 const gazeOffset = new THREE.Vector3(), gazeGlance = new THREE.Vector3(), THINKING_GAZE = new THREE.Vector3(-0.35, 0.3, 0);
 const gazePoint = new THREE.Vector3(), gazeWant = new THREE.Vector3();
 let nextGlance = 0, gazeStarted = false;
+let touchGaze = null;   // the hand, while it's touching her (touch.js)
 function updateGaze(dt, now) {
   const dist = active ? camera.position.distanceTo(active.root.position) : 2;
   if (now > nextGlance) {
@@ -2549,6 +2558,7 @@ function updateGaze(dt, now) {
     else gazeWant.set(0, 0.35, 1.2).multiplyScalar(active.root.scale.y)
       .applyAxisAngle(new THREE.Vector3(0, 1, 0), active.root.rotation.y).add(active.root.position);
   }
+  if (touchGaze) gazeWant.copy(touchGaze);
   if (!gazeStarted) { gazePoint.copy(gazeWant); gazeStarted = true; }
   gazePoint.lerp(gazeWant, Math.min(1, dt * 6));
   gaze.position.copy(gazePoint);
@@ -2621,8 +2631,13 @@ const touch = createTouch({
   editing: () => editing,
   moodTags: () => (workActions || catalogue).filter(a => a.kind === 'mood').map(a => a.tag),
   pickables: () => [roomGroup, itemsGroup],
+  files: () => files,
   registerEditorKind: (kind, handlers) => editorKinds.set(kind, handlers),
   selectInEditor: obj => { if (editing) select(obj); },
+  setMood: (tag, seconds) => { if (active) touchMood(active, tag, seconds); },
+  lookAt: point => { touchGaze = point; },
+  tell: message => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'touch', ...message })); },
+  fromAnimation, layered,
 });
 $('handToggle').onclick = () => touch.setHand(!touch.handOn);
 
@@ -2647,6 +2662,7 @@ renderer.setAnimationLoop(() => {
     updateHeadTurn(ch, dt);
     leanBack(ch, dt);
     spreadKnees(ch, dt);
+    touch.pose(ch, dt);
     const em = ch.vrm.expressionManager;
     em?.setValue('aa', mouth);
     nextBlink -= dt;

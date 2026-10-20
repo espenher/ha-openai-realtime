@@ -24,7 +24,7 @@ from app.audio_recording_service import AudioRecordingService
 from app.phase_emitter import PhaseEmitter, STALE_AUDIO, TURN_LIVENESS
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGate
 from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap
-from app.avatar_body import avatar_instructions, body_tag_action, describe_activity
+from app.avatar_body import TOUCH_NOTE_S, avatar_instructions, body_tag_action, describe_activity
 from app.ha_agent import MODE as AGENT_MODE, AgentReplies, HAConversationAgent
 from app.transcript_logger import TranscriptLogger
 
@@ -876,17 +876,17 @@ class WebSocketHandler:
 
         phase_emitter.set_stale_speech_handler(_on_stale_speech)
 
-        async def _announce(message: str) -> str:
-            """Have the assistant say `message` out loud, unprompted, in its own
-            voice and words (e.g. "the washing machine is done"). Waits up to a
-            minute for a conversation in progress to finish."""
+        async def _say_unprompted(prompt: str, wait_s: int) -> str:
+            """Have the assistant speak up out loud without being asked, prompted by
+            `prompt` (a system message). Waits up to `wait_s` seconds for a
+            conversation in progress to finish, else gives up ("busy")."""
             if not self._websockets:
                 return "no device connected"
-            for _ in range(60):
+            for _ in range(wait_s):
                 if phase_emitter._current in (None, "idle"):
                     break
                 await asyncio.sleep(1)
-            else:
+            if phase_emitter._current not in (None, "idle"):
                 return "busy"
             _announcing["v"] = True
             if agent_replies is not None:
@@ -902,11 +902,7 @@ class WebSocketHandler:
                 role="system",
                 content=[openai_rt_events.ItemContent(
                     type="input_text",
-                    text=(
-                        "Home Assistant notification. Nobody spoke to you; announce this "
-                        "to Espen now, unprompted, in one or two short sentences, in "
-                        f"character. Don't ask a question. Notification: {message}"
-                    ),
+                    text=prompt,
                 )],
             )
             await openai_service.send_client_event(openai_rt_events.ConversationItemCreateEvent(item=item))
@@ -919,8 +915,21 @@ class WebSocketHandler:
                     tool_choice="none",
                 )
             ))
-            logger.info(f"📣 announcement: {message[:120]}")
             return "ok"
+
+        async def _announce(message: str) -> str:
+            """Have the assistant say `message` out loud, unprompted, in its own
+            voice and words (e.g. "the washing machine is done"). Waits up to a
+            minute for a conversation in progress to finish."""
+            result = await _say_unprompted(
+                "Home Assistant notification. Nobody spoke to you; announce this "
+                "to Espen now, unprompted, in one or two short sentences, in "
+                f"character. Don't ask a question. Notification: {message}",
+                wait_s=60,
+            )
+            if result == "ok":
+                logger.info(f"📣 announcement: {message[:120]}")
+            return result
 
         self.announce = _announce
 
@@ -1029,6 +1038,28 @@ class WebSocketHandler:
 
         AVATAR.on_layout_saved = _refresh_avatar_instructions
         AVATAR.on_activity = _refresh_avatar_instructions
+
+        async def _on_touch(speak: bool) -> None:
+            """The hand on the avatar page touched her (avatar.py, _touched): her notes
+            say so; if the zone's count or time came up, she reacts out loud (only if
+            she's free, a touch isn't worth waiting for); and a finished touch drops
+            out of her notes again after TOUCH_NOTE_S."""
+            touch = AVATAR.touch
+            await _refresh_avatar_instructions()
+            if speak and PERSONA_STATE.active == SECOND:
+                result = await _say_unprompted(
+                    f"On your screen, {touch['told']}. Nobody spoke to you; react to it out "
+                    "loud now, in character, in one short sentence.",
+                    wait_s=0,
+                )
+                logger.info(f"🖐 she reacts out loud: {result}")
+            if not touch["ongoing"]:
+                await asyncio.sleep(TOUCH_NOTE_S + 1)
+                if AVATAR.touch is touch:
+                    AVATAR.touch = None
+                    await _refresh_avatar_instructions()
+
+        AVATAR.on_touch = _on_touch
 
         async def _switch_persona(option: str, greet: bool = True) -> None:
             """Make the persona named by the input_select option active."""
