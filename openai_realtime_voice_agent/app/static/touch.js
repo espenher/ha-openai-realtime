@@ -67,8 +67,7 @@ const KEEP_OUTSIDE_S = 0.25;    // is this many bubble sizes away, or outside it
 // The springy parts of a model the hand may push, by their names in the model (and so
 // the editor's tick list). Skirt and chest springs are left out on purpose.
 const SPRINGS_LEFT_OUT = /skirt|breast|bust|chest/i;
-const SPRING_REACH = 1.3;   // the hand pushes springs this many times its own size away: her shell
-                            // covers the hair near her head, so the hand rests on the hair's surface
+const SPRING_REACH = 1.3;   // the hand pushes springs within this many times its own size
 
 // Where she can be touched, until the layout has its own list. Positions are from the
 // bone, in her own directions at Size 1: x to her left, y up, z forward (metres).
@@ -184,9 +183,9 @@ export function createTouch(page) {
 
   // ---------- shell ----------
   // Her body's shape for the hand: a rounded tube along each limb and body bone and an
-  // egg shape for her head (hair near the head included), each as thick as the model is
-  // there (clothes too), measured once per model. The hand stops at it, and the shadow
-  // falls on it.
+  // egg shape for her head, each as thick as the model is there (clothes too, but not
+  // hair: a hand goes into hair down to her head, pushing the strands), measured once
+  // per model. The hand stops at it, and the shadow falls on it.
   const SHELL_BONES = [   // [bone, the bone it reaches to]; null: an egg shape (the head)
     ['hips', 'spine'], ['spine', 'chest'], ['chest', 'neck'], ['neck', 'head'], ['head', null],
     ...['left', 'right'].flatMap(side => [
@@ -194,7 +193,6 @@ export function createTouch(page) {
       [`${side}UpperLeg`, `${side}LowerLeg`], [`${side}LowerLeg`, `${side}Foot`], [`${side}Foot`, `${side}Toes`],
     ]),
   ];
-  const HAIR_REACH = 0.22;   // metres from the head bone (at Size 1) that hair still counts as head
   const shellMaterial = new THREE.MeshBasicMaterial({ visible: false });
   const shellSizes = new Map();  // model uuid → [{ bone, to, radius } | { bone, center, size }] (bone frames, Size 1)
   let shell = [];                // [{ part, node, mesh }] on the character on screen
@@ -224,9 +222,9 @@ export function createTouch(page) {
   }
   // How thick she is around each bone: the skin (and clothes) mostly moved by that
   // bone, measured from the bone's line (most of the way out, not the furthest stray
-  // point). The head is fitted to the outer edges of head and hair instead: the face
-  // has far more points than the top of the head, which a "most of the way out" measure
-  // would leave sticking out. In each bone's own frame, so the pose doesn't matter.
+  // point). The head is fitted to the outer edges of the head instead: the face has far
+  // more points than the top of the head, which a "most of the way out" measure would
+  // leave sticking out. In each bone's own frame, so the pose doesn't matter.
   function measureShell(ch) {
     const h = ch.vrm.humanoid;
     const parts = SHELL_BONES
@@ -235,12 +233,6 @@ export function createTouch(page) {
       .filter(p => p.raw && p.node && (p.to === null || p.toNode));
     const byRaw = new Map(parts.map(p => [p.raw, { ...p, points: [] }]));
     ch.root.updateMatrixWorld(true);
-    // Hair hangs from bones of its own under the head; what's near the head counts as
-    // head (the twin tails reaching down her back don't).
-    const head = byRaw.get(h.getRawBoneNode('head'));
-    const headAt = head?.raw.getWorldPosition(new THREE.Vector3());
-    const nearHead = HAIR_REACH * ch.root.scale.y;
-    const underHead = bone => { for (let b = bone?.parent; b; b = b.parent) if (b === head?.raw) return !byRaw.has(bone); return false; };
     const v = new THREE.Vector3();
     ch.vrm.scene.traverse(m => {
       if (!m.isSkinnedMesh || !m.visible) return;
@@ -248,13 +240,8 @@ export function createTouch(page) {
       for (let i = 0; i < skinIndex.count; i += 3) {   // every third vertex is plenty
         let best = 0, bone = -1;
         for (let k = 0; k < 4; k++) if (skinWeight.getComponent(i, k) > best) { best = skinWeight.getComponent(i, k); bone = skinIndex.getComponent(i, k); }
-        const owner = m.skeleton.bones[bone];
-        const part = byRaw.get(owner);
+        const part = byRaw.get(m.skeleton.bones[bone]);
         if (part) part.points.push(m.getVertexPosition(i, v).applyMatrix4(m.matrixWorld).clone());
-        else if (head && underHead(owner)) {
-          const at = m.getVertexPosition(i, v).applyMatrix4(m.matrixWorld);
-          if (at.distanceTo(headAt) < nearHead) head.points.push(at.clone());
-        }
       }
     });
     const sizes = [];
@@ -372,11 +359,12 @@ export function createTouch(page) {
   page.canvas.addEventListener('wheel', e => {
     if (!handOn || page.editing()) return;
     e.preventDefault();
-    // Wheel away from you pushes it away; the step grows with the distance, so it feels
-    // the same near and far.
-    const forward = page.camera.getWorldDirection(new THREE.Vector3());
-    const distance = handAt.distanceTo(page.camera.position);
-    moveHandBy(forward.multiplyScalar(-e.deltaY * 0.0012 * handSettings().scrollSpeed * distance));
+    // Wheel away from you pushes it away, along the line from your eye through the hand
+    // (so it stays put on screen); the step grows with the distance, so it feels the
+    // same near and far.
+    const sight = handAt.clone().sub(page.camera.position);
+    const distance = sight.length();
+    moveHandBy(sight.normalize().multiplyScalar(-e.deltaY * 0.0012 * handSettings().scrollSpeed * distance));
   }, { passive: false });
   // Where you've moved it to; she's in the way of that each frame (see fly).
   function moveHandBy(delta) { handAt.add(delta); }
@@ -489,7 +477,7 @@ export function createTouch(page) {
   // ticked in the editor. A group is what hangs from one "...Root" bone (Hair_FrontRoot:
   // "Hair Front"), or a chain of its own (TieRoot: "Tie").
   const handCollider = new VRMSpringBoneCollider(new VRMSpringBoneColliderShapeSphere({ radius: DEFAULT_HAND.size }));
-  hand.add(handCollider);
+  page.scene.add(handCollider);
   const handColliderGroup = { colliders: [handCollider], name: 'touch hand' };
   let springGroups = new Map();   // group name → [joint]
 
@@ -514,7 +502,11 @@ export function createTouch(page) {
   const pushedGroups = () => settings().springs ?? [...springGroups.keys()];
   function updateSprings() {
     const pushed = new Set(handOn && hand.visible ? pushedGroups() : []);
-    handCollider.shape.radius = handRadius() * SPRING_REACH;   // in metres: the springs don't scale it with the hand
+    handCollider.position.copy(hand.position);
+    handCollider.shape.radius = handRadius() * SPRING_REACH;   // in metres
+    // updateWorldMatrix, not updateMatrixWorld: only it refreshes the matrix the springs
+    // actually test against (the collider's colliderMatrix).
+    handCollider.updateWorldMatrix(false, false);
     for (const [name, joints] of springGroups) {
       for (const j of joints) {
         if (pushed.has(name)) { if (!j.colliderGroups.includes(handColliderGroup)) j.colliderGroups.push(handColliderGroup); }
@@ -784,6 +776,7 @@ export function createTouch(page) {
     setHand,
     get handOn() { return handOn; },
     get state() { return lastSensed; },          // what the hand is near and touching (for checking)
+    placeHandAt: point => { handAt.copy(point); hand.position.copy(point); hand.userData.placed = true; pointerInside = true; },   // (for checking)
     onFeel: listen => listeners.push(listen),   // (event) → { zone, kind, phase, seconds | repeats }
     editorOpened: drawEditor,
   };
