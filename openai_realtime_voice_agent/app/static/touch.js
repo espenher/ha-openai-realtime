@@ -2,6 +2,8 @@
 //
 // The 🖐 button (or H) brings up a hand you fly about: the mouse moves it across the
 // screen, the scroll wheel nearer and further. A shadow under it shows how high it is.
+// While it's out the page has the mouse to itself (pointer lock, like a browser game),
+// so the hand can go on moving where the cursor would hit the edge; Esc lets go.
 // She's solid to it: it stops at her body (an invisible shell measured from the model)
 // instead of going through. Resting on her is touching her; a click is a quick pat.
 //
@@ -325,8 +327,25 @@ export function createTouch(page) {
     document.body.classList.toggle('hand', on);
     hand.userData.placed = false;
     lastPointer = null;
-    if (!on) endContact();
+    if (on) lockMouse();
+    else {
+      endContact();
+      if (document.pointerLockElement === page.canvas) document.exitPointerLock();
+    }
   }
+  // Pointer lock needs a click or key press to start, so it's asked for when the hand
+  // comes out, and again on a click if the browser said no. Losing it (Esc) puts the
+  // hand away.
+  let wasLocked = false;
+  function lockMouse() {
+    try { page.canvas.requestPointerLock()?.catch?.(() => {}); } catch { /* asked again on a click */ }
+  }
+  const mouseLocked = () => document.pointerLockElement === page.canvas;
+  document.addEventListener('pointerlockchange', () => {
+    if (mouseLocked()) { wasLocked = true; return; }
+    if (wasLocked && handOn) setHand(false);
+    wasLocked = false;
+  });
   const scale = () => page.active()?.root.scale.y ?? 1;
   const handRadius = () => handSettings().size * scale();
 
@@ -336,8 +355,11 @@ export function createTouch(page) {
     pointerInside = true;
     if (!handOn || page.editing()) return;
     if (!hand.userData.placed) placeAtPointer(e);
-    if (lastPointer) {
-      const dx = e.clientX - lastPointer[0], dy = e.clientY - lastPointer[1];
+    // Locked, the mouse's own movement; otherwise how far the cursor moved.
+    const moved = mouseLocked() ? [e.movementX, e.movementY]
+      : lastPointer ? [e.clientX - lastPointer[0], e.clientY - lastPointer[1]] : null;
+    if (moved) {
+      const [dx, dy] = moved;
       const distance = handAt.distanceTo(page.camera.position);
       const perPixel = 2 * distance * Math.tan(THREE.MathUtils.degToRad(page.camera.fov) / 2) / innerHeight;
       const right = new THREE.Vector3().setFromMatrixColumn(page.camera.matrixWorld, 0);
@@ -346,7 +368,7 @@ export function createTouch(page) {
     }
     lastPointer = [e.clientX, e.clientY];
   });
-  page.canvas.addEventListener('pointerleave', () => { pointerInside = false; lastPointer = null; });
+  page.canvas.addEventListener('pointerleave', () => { if (!mouseLocked()) { pointerInside = false; lastPointer = null; } });
   page.canvas.addEventListener('wheel', e => {
     if (!handOn || page.editing()) return;
     e.preventDefault();
@@ -373,6 +395,7 @@ export function createTouch(page) {
   }
   page.canvas.addEventListener('pointerdown', e => {
     if (!handOn || page.editing() || e.button !== 0) return;
+    if (!mouseLocked()) lockMouse();
     pat = { since: performance.now() / 1000 };
   });
 
@@ -744,6 +767,7 @@ export function createTouch(page) {
   // ---------- every frame ----------
   function update(dt) {
     const now = performance.now() / 1000;
+    if (page.editing() && mouseLocked()) document.exitPointerLock();
     if (page.active() !== builtFor || zones() !== builtFrom) rebuild();
     for (const { mesh } of bubbles) mesh.visible = page.editing();
     const near = fly(dt, now);
