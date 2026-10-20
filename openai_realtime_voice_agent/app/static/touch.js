@@ -49,6 +49,8 @@ const MOTIONS = ['none', 'lean in', 'flinch'];
 // Flying the hand (the hand's size and the scroll speed are editor settings).
 const NEAREST = 0.25, FURTHEST = 6;  // metres from the camera the hand can be
 const TURNS_TO_HER_WITHIN = 0.15;    // metres: nearer her than this, the palm turns towards her
+const PALM_GAP = 0.25;               // the hand is flat: its middle rests this share of its size off
+                                     // a surface (the palm's half-thickness), not a whole hand-size
 const PRESS_DEPTH = 0.04;            // metres: scrolled into her, the hand presses on her (and rides over
                                      // her as it's moved) up to this much "in" before it stops going deeper
 const FOLLOW_RATE = 20;              // how quickly the hand on screen catches up (per second)
@@ -334,6 +336,7 @@ export function createTouch(page) {
   });
   const scale = () => page.active()?.root.scale.y ?? 1;
   const handRadius = () => handSettings().size * scale();
+  const palmGap = () => handRadius() * PALM_GAP;   // from the hand's middle to its palm
 
   // The mouse moves it across the screen (each pixel about a pixel's worth at the hand's
   // distance), the wheel nearer and further.
@@ -399,10 +402,10 @@ export function createTouch(page) {
     const shown = handAt.clone();
     if (page.active()) {
       ray.set(camera, sight);
-      ray.far = depth + handRadius();
+      ray.far = depth + palmGap();
       const hit = ray.intersectObjects(shell.map(s => s.mesh), false)[0];
       ray.far = Infinity;
-      const stop = hit ? hit.distance - handRadius() : Infinity;
+      const stop = hit ? hit.distance - palmGap() : Infinity;
       if (depth > stop) {
         shown.copy(camera).addScaledVector(sight, Math.max(NEAREST, stop));
         if (depth > stop + PRESS_DEPTH * scale()) handAt.copy(camera).addScaledVector(sight, stop + PRESS_DEPTH * scale());
@@ -410,8 +413,8 @@ export function createTouch(page) {
     }
     // She can also move into it herself: out to her surface then.
     let near = page.active() ? nearestOnHer(shown) : null;
-    if (near && near.distance < handRadius()) {
-      shown.copy(near.point).addScaledVector(near.normal, handRadius());
+    if (near && near.distance < palmGap()) {
+      shown.copy(near.point).addScaledVector(near.normal, palmGap());
       near = nearestOnHer(shown);
     }
     // A click's pat: a quick dip towards her (or straight ahead), and back.
@@ -419,14 +422,14 @@ export function createTouch(page) {
       const t = (now - pat.since) / PAT_S;
       if (t >= 1) pat = null;
       else {
-        const toward = near && near.distance < PAT_REACH + handRadius() ? near.normal.clone().negate()
+        const toward = near && near.distance < PAT_REACH + palmGap() ? near.normal.clone().negate()
           : page.camera.getWorldDirection(new THREE.Vector3());
-        const reach = near ? Math.min(PAT_REACH, Math.max(0, near.distance - handRadius() + 0.003)) : PAT_REACH;
+        const reach = near ? Math.min(PAT_REACH, Math.max(0, near.distance - palmGap() + 0.003)) : PAT_REACH;
         shown.addScaledVector(toward, reach * Math.sin(Math.PI * t));
       }
     }
     // Palm towards her when it's close to her, otherwise palm down.
-    const facing = near && near.distance < TURNS_TO_HER_WITHIN + handRadius() ? near.normal : new THREE.Vector3(0, 1, 0);
+    const facing = near && near.distance < TURNS_TO_HER_WITHIN + palmGap() ? near.normal : new THREE.Vector3(0, 1, 0);
     const k = 1 - Math.exp(-dt * FOLLOW_RATE);
     hand.position.lerp(shown, k);
     hand.quaternion.slerp(palmFacing(facing), k);
@@ -528,7 +531,7 @@ export function createTouch(page) {
 
   let lastSensed = null;   // for looking in from the console (touch.state)
   function sense(near, now) {
-    const touching = near && hand.visible && hand.position.distanceTo(near.point) <= handRadius() + TOUCHING_WITHIN * scale() + 0.005;
+    const touching = near && hand.visible && hand.position.distanceTo(near.point) <= palmGap() + TOUCHING_WITHIN * scale() + 0.005;
     lastSensed = { near: near && { distance: +near.distance.toFixed(3), point: near.point.toArray().map(v => +v.toFixed(3)) },
                    handToPoint: near ? +hand.position.distanceTo(near.point).toFixed(3) : null, touching: !!touching,
                    zone: touching ? zoneAt(near.point)?.name ?? null : null, contact: contact?.zone.name ?? null };
