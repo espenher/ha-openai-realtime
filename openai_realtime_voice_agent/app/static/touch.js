@@ -4,7 +4,10 @@
 // whatever is under it. Press and hold to lower it onto that: a quick press is a POKE,
 // held still is a TOUCH, held and moved is a STROKE.
 //
-// Her body has touch zones, each a bubble riding on one of her bones. They live in the
+// The hand rests on her body's shape (an invisible shell measured from the model, see
+// "shell"), anywhere on her. Her body also has touch zones, each a bubble riding on one
+// of her bones, marking the places that mean something: a touch counts for a zone
+// when the hand rests inside its bubble. They live in the
 // layout (layout.touch.zones) and are edited in the room editor's Touch section, which
 // this file also draws. For each kind of touch a zone says what it means to her: how
 // she moves, the moods she goes through as it goes on, what she's told, and when she
@@ -12,6 +15,7 @@
 //
 // The parts, in order below:
 //   zones     the zone list (the layout's, or the defaults) and the bubbles on her bones
+//   shell     her body's shape for the hand to rest on, measured from the model
 //   hand      the hand model, and steering it with the pointer
 //   sensing   which zone the hand is on, and whether that's a poke, touch or stroke
 //   readout   a line on screen saying what she feels (until the reactions are in)
@@ -43,7 +47,7 @@ const FOLLOW_RATE = 18;         // how quickly the hand catches up with the poin
 // Moods are tags from the editor's Moods & gestures list; she goes through them in
 // order as a touch goes on (every few seconds) or repeats (each poke).
 const DEFAULT_ZONES = [
-  zone('head', 'top of head', 'head', [0, 0.17, -0.02], 0.075, {
+  zone('head', 'top of head', 'head', [0, 0.17, 0], 0.09, {
     poke: { motion: 'none', moods: ['happy'], told: 'Espen patted your head', speakAfter: 4 },
     touch: { motion: 'lean in', moods: ['shy', 'happy'], told: 'Espen has a hand on your head', speakAfter: 0 },
     stroke: { motion: 'lean in', moods: ['shy', 'happy'], told: 'Espen is stroking your hair', speakAfter: 12 },
@@ -107,6 +111,7 @@ export function createTouch(page) {
     for (const { mesh } of bubbles) mesh.removeFromParent();
     bubbles = [];
     const ch = page.active();
+    if (ch !== builtFor) rebuildShell(ch);
     builtFor = ch;
     builtFrom = zones();
     if (!ch) return;
@@ -121,6 +126,104 @@ export function createTouch(page) {
       bubbles.push({ zone: z, mesh });
     }
   }
+  // ---------- shell ----------
+  // What the hand rests on when it's over her: a rounded tube along each limb and
+  // body bone and an egg shape for her head (hair included), each as thick as the
+  // model is there (clothes too), measured once per model. Invisible; it just keeps
+  // the hand from sinking into her.
+  const SHELL_BONES = [   // [bone, the bone it reaches to]; null: an egg shape (the head)
+    ['hips', 'spine'], ['spine', 'chest'], ['chest', 'neck'], ['neck', 'head'], ['head', null],
+    ...['left', 'right'].flatMap(side => [
+      [`${side}UpperArm`, `${side}LowerArm`], [`${side}LowerArm`, `${side}Hand`], [`${side}Hand`, `${side}MiddleProximal`],
+      [`${side}UpperLeg`, `${side}LowerLeg`], [`${side}LowerLeg`, `${side}Foot`], [`${side}Foot`, `${side}Toes`],
+    ]),
+  ];
+  const HAIR_REACH = 0.22;   // metres from the head bone (at Size 1) that hair still counts as head
+  const shellMaterial = new THREE.MeshBasicMaterial({ visible: false });
+  const shellSizes = new Map();  // model uuid → [{ bone, to, radius } | { bone, center, size }] (bone frames, Size 1)
+  let shell = [];                // the shell's meshes on the character on screen
+
+  function rebuildShell(ch) {
+    for (const mesh of shell) mesh.removeFromParent();
+    shell = [];
+    if (!ch) return;
+    if (!shellSizes.has(ch.vrm.scene.uuid)) shellSizes.set(ch.vrm.scene.uuid, measureShell(ch));
+    for (const part of shellSizes.get(ch.vrm.scene.uuid)) {
+      const bone = ch.vrm.humanoid.getNormalizedBoneNode(part.bone);
+      let mesh;
+      if (part.to) {
+        const along = new THREE.Vector3().fromArray(part.to);
+        const length = along.length();
+        mesh = new THREE.Mesh(new THREE.CapsuleGeometry(part.radius, length, 4, 10), shellMaterial);
+        mesh.position.copy(along).multiplyScalar(0.5);
+        mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), along.normalize());
+      } else {
+        mesh = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), shellMaterial);
+        mesh.position.fromArray(part.center);
+        mesh.scale.fromArray(part.size);
+      }
+      mesh.userData = { kind: 'touchShell' };
+      bone.add(mesh);
+      shell.push(mesh);
+    }
+  }
+  // How thick she is around each bone: the skin (and clothes) mostly moved by that
+  // bone, measured from the bone's line (most of the way out, not the furthest
+  // stray point). The head is fitted to the outer edges of head and hair instead: the
+  // face has far more points than the top of the head, which a "most of the way out"
+  // measure would leave sticking out. In each bone's own frame, so the pose doesn't matter.
+  function measureShell(ch) {
+    const h = ch.vrm.humanoid;
+    const parts = SHELL_BONES
+      .map(([bone, to]) => ({ bone, to, raw: h.getRawBoneNode(bone), node: h.getNormalizedBoneNode(bone),
+                              toNode: to && h.getNormalizedBoneNode(to) }))
+      .filter(p => p.raw && p.node && (p.to === null || p.toNode));
+    const byRaw = new Map(parts.map(p => [p.raw, { ...p, points: [] }]));
+    ch.root.updateMatrixWorld(true);
+    // Hair hangs from bones of its own under the head; what's near the head counts as
+    // head (the twin tails reaching down her back don't).
+    const head = byRaw.get(h.getRawBoneNode('head'));
+    const headAt = head?.raw.getWorldPosition(new THREE.Vector3());
+    const nearHead = HAIR_REACH * ch.root.scale.y;
+    const underHead = bone => { for (let b = bone?.parent; b; b = b.parent) if (b === head?.raw) return !byRaw.has(bone); return false; };
+    const v = new THREE.Vector3();
+    ch.vrm.scene.traverse(m => {
+      if (!m.isSkinnedMesh || !m.visible) return;
+      const { skinIndex, skinWeight } = m.geometry.attributes;
+      for (let i = 0; i < skinIndex.count; i += 3) {   // every third vertex is plenty
+        let best = 0, bone = -1;
+        for (let k = 0; k < 4; k++) if (skinWeight.getComponent(i, k) > best) { best = skinWeight.getComponent(i, k); bone = skinIndex.getComponent(i, k); }
+        const owner = m.skeleton.bones[bone];
+        const part = byRaw.get(owner);
+        if (part) part.points.push(m.getVertexPosition(i, v).applyMatrix4(m.matrixWorld).clone());
+        else if (head && underHead(owner)) {
+          const at = m.getVertexPosition(i, v).applyMatrix4(m.matrixWorld);
+          if (at.distanceTo(headAt) < nearHead) head.points.push(at.clone());
+        }
+      }
+    });
+    const sizes = [];
+    for (const part of byRaw.values()) {
+      if (part.points.length < 10) continue;
+      const toLocal = part.node.matrixWorld.clone().invert();
+      const local = part.points.map(q => q.applyMatrix4(toLocal));
+      if (part.to) {
+        const end = part.node.worldToLocal(part.toNode.getWorldPosition(new THREE.Vector3()));
+        const line = new THREE.Line3(new THREE.Vector3(), end), closest = new THREE.Vector3();
+        const radius = quantile(local.map(q => line.closestPointToPoint(q, true, closest).distanceTo(q)), 0.8);
+        sizes.push({ bone: part.bone, to: end.toArray(), radius: Math.max(0.01, radius) });
+      } else {
+        const range = axis => [quantile(local.map(q => q[axis]), 0.01), quantile(local.map(q => q[axis]), 0.99)];
+        const [x, y, z] = ['x', 'y', 'z'].map(range);
+        sizes.push({ bone: part.bone, to: null,
+                     center: [x, y, z].map(([lo, hi]) => (lo + hi) / 2),
+                     size: [x, y, z].map(([lo, hi]) => Math.max(0.02, (hi - lo) / 2)) });
+      }
+    }
+    return sizes;
+  }
+  const quantile = (values, q) => values.sort((a, b) => a - b)[Math.floor((values.length - 1) * q)];
+
   function restTurn(ch) {
     return ch.vrm.scene.getWorldQuaternion(new THREE.Quaternion()).invert()
       .multiply(ch.root.getWorldQuaternion(new THREE.Quaternion()));
@@ -162,23 +265,23 @@ export function createTouch(page) {
     if (!on) endContact();
   }
 
-  // Where the hand goes this frame: onto the first thing under the pointer (a zone
-  // bubble, the room, furniture), its palm facing that surface, fingers pointing away
-  // from the camera.
+  // Where the hand goes this frame: onto the first thing under the pointer (her shell,
+  // the room, furniture), palm towards that surface.
   function steer(dt) {
     hand.visible = handOn && pointerInside && !page.editing();
     if (!hand.visible) { under = null; return; }
     ray.setFromCamera(pointer, page.camera);
-    const targets = [...bubbles.map(b => b.mesh), ...page.pickables()];
-    const hit = ray.intersectObjects(targets, true).find(h => h.face && isShown(h.object));
+    const hit = ray.intersectObjects([...shell, ...page.pickables()], true).find(h => h.face && isShown(h.object));
     if (hit) {
-      const bubble = bubbles.find(b => b.mesh === hit.object);
-      const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+      // The smooth (interpolated) normal where there is one: a tufted or faceted
+      // surface would otherwise turn the hand with every bump.
+      const normal = (hit.normal ?? hit.face.normal).clone().transformDirection(hit.object.matrixWorld);
       if (normal.dot(ray.ray.direction) > 0) normal.negate();
-      under = { zone: bubble?.zone ?? null, point: hit.point, normal };
+      under = { point: hit.point, normal, onHer: shell.includes(hit.object) };
     } else {
-      under = { zone: null, point: ray.ray.at(1.5, new THREE.Vector3()), normal: new THREE.Vector3(0, 1, 0) };
+      under = { point: ray.ray.at(1.5, new THREE.Vector3()), normal: new THREE.Vector3(0, 1, 0), onHer: false };
     }
+    under.zone = under.onHer ? zoneAt(under.point) : null;
     const gap = (pressed ? TOUCH_GAP : HOVER_GAP) * (page.active()?.root.scale.y ?? 1);
     handGoal.copy(under.point).addScaledVector(under.normal, gap);
     handTurnGoal.copy(palmFacing(under.normal));
@@ -188,17 +291,32 @@ export function createTouch(page) {
     hand.userData.placed = true;
   }
   const isShown = o => { for (let x = o; x; x = x.parent) if (!x.visible && !x.userData?.kind?.startsWith('touch')) return false; return true; };
+  // The zone whose bubble the point is in (the nearest middle, where bubbles overlap).
+  function zoneAt(point) {
+    let best = null, bestDistance = Infinity;
+    const center = new THREE.Vector3(), scale = new THREE.Vector3();
+    for (const { zone, mesh } of bubbles) {
+      mesh.getWorldPosition(center);
+      const distance = center.distanceTo(point);
+      if (distance <= mesh.getWorldScale(scale).x && distance < bestDistance) { best = zone; bestDistance = distance; }
+    }
+    return best;
+  }
   function palmFacing(normal) {
-    // The palm is the hand's -y: it faces down onto the surface, fingers (-z) away from the camera.
+    // The palm (the hand's -y) towards the surface. The fingers (-z) point up along an
+    // upright surface, like a hand against glass, and away from the camera along a
+    // flat one, blending between the two as the surface tilts.
     const up = normal.clone();
-    const away = new THREE.Vector3();
-    page.camera.getWorldDirection(away);
-    away.addScaledVector(up, -away.dot(up));
-    if (away.lengthSq() < 1e-6) away.set(0, 0, -1).addScaledVector(up, -up.z);
-    away.normalize();
-    const side = new THREE.Vector3().crossVectors(up, away.clone().negate());
-    const m = new THREE.Matrix4().makeBasis(side, up, away.clone().negate());
-    return new THREE.Quaternion().setFromRotationMatrix(m);
+    const flat = new THREE.Vector3();
+    page.camera.getWorldDirection(flat);
+    flat.addScaledVector(up, -flat.dot(up));
+    const upright = new THREE.Vector3(0, 1, 0).addScaledVector(up, -up.y);
+    const fingers = flat.add(upright);
+    if (fingers.lengthSq() < 1e-6) fingers.set(0, 0, -1).addScaledVector(up, -up.z);
+    fingers.normalize();
+    const back = fingers.clone().negate();
+    const side = new THREE.Vector3().crossVectors(up, back);
+    return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(side, up, back));
   }
 
   // ---------- sensing ----------
