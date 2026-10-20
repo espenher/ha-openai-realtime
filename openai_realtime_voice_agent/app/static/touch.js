@@ -6,12 +6,13 @@
 // so the hand can go on moving where the cursor would hit the edge; Esc lets go.
 // She's solid to it: whatever part of her is in front of the hand stops it (an invisible
 // shell measured from the model), so scrolling in presses it onto her, and moving it
-// then rides it over her shape. Resting on her is touching her; a click is a quick pat.
+// then rides it over her shape. Resting on her is touching her; holding the left button
+// down grabs (the hand closes and reaches for whatever is in front of it).
 //
 // Her body has touch zones, each a bubble riding on one of her bones, marking the places
 // that mean something: a touch counts for a zone when the hand is on her overlapping its
-// bubble. Touching a zone is one of three kinds: a POKE (a quick touch, like a click's
-// pat), a TOUCH (resting there) or a STROKE (moving about on it). For each kind a zone
+// bubble. Touching a zone is one of three kinds: a POKE (a quick touch, like a quick
+// click), a TOUCH (resting there) or a STROKE (moving about on it). For each kind a zone
 // says what it means to her: how she moves, the moods she goes through, what she's told,
 // and when she says something about it.
 //
@@ -29,7 +30,7 @@
 // The parts, in order below:
 //   zones     the zone list (the layout's, or the defaults) and the bubbles on her bones
 //   shell     her body's shape, measured from the model: what the hand stops at
-//   hand      flying the hand about (mouse, scroll wheel, click to pat)
+//   hand      flying the hand about (mouse, scroll wheel, left button to grab)
 //   hand model  the simple hand, or a model from the media folder
 //   shadow    the spot under the hand that shows how high it is
 //   springs   which of her springy parts the hand pushes
@@ -50,7 +51,7 @@ import { VRMSpringBoneCollider, VRMSpringBoneColliderShapeSphere } from '@pixiv/
 // ---------- settings ----------
 const KINDS = ['poke', 'touch', 'stroke'];
 const KIND_HELP = {
-  poke: 'a quick touch (a click pats)',
+  poke: 'a quick touch (or a quick click)',
   touch: 'the hand resting there',
   stroke: 'moving about on it',
 };
@@ -64,8 +65,8 @@ const PALM_GAP = 0.25;               // the hand is flat: its middle rests this 
 const PRESS_DEPTH = 0.04;            // metres: scrolled into her, the hand presses on her (and rides over
                                      // her as it's moved) up to this much "in" before it stops going deeper
 const FOLLOW_RATE = 20;              // how quickly the hand on screen catches up (per second)
-const PAT_S = 0.3;                   // a click's pat: down and back up in this long...
-const PAT_REACH = 0.08;              // ...reaching this far (metres) towards whatever is nearest
+const GRAB_S = 0.1;                  // the left button held: the hand closes in about this long...
+const GRAB_REACH = 0.08;             // ...reaching this far (metres) towards whatever is nearest
 
 // Telling touches apart.
 const TOUCHING_WITHIN = 0.015;  // metres between hand and skin that still counts as touching
@@ -338,8 +339,8 @@ export function createTouch(page) {
   hand.visible = false;
   page.scene.add(hand);
   let handOn = false, pointerInside = false;
-  const handAt = new THREE.Vector3();   // where you've flown it (the hand on screen follows, plus any pat)
-  let pat = null;                       // a click's pat: { since }
+  const handAt = new THREE.Vector3();   // where you've flown it (the hand on screen follows, plus any grab)
+  let grabbing = false, grip = 0;       // the left button is held; how closed the hand is (0 open, 1 grabbing)
   let lastPointer = null;
   const ray = new THREE.Raycaster();
 
@@ -406,8 +407,9 @@ export function createTouch(page) {
   page.canvas.addEventListener('pointerdown', e => {
     if (!handOn || page.editing() || e.button !== 0) return;
     if (!mouseLocked()) lockMouse();
-    pat = { since: performance.now() / 1000 };
+    grabbing = true;
   });
+  addEventListener('pointerup', e => { if (e.button === 0) grabbing = false; });
 
   // Where it starts: just in front of whatever is under the pointer.
   function placeAtPointer(e) {
@@ -450,17 +452,16 @@ export function createTouch(page) {
       shown.copy(near.point).addScaledVector(near.normal, palmGap());
       near = nearestOnHer(shown);
     }
-    // A click's pat: a quick dip towards her (or straight ahead), and back.
-    if (pat) {
-      const t = (now - pat.since) / PAT_S;
-      if (t >= 1) pat = null;
-      else {
-        const toward = near && near.distance < PAT_REACH + palmGap() ? near.normal.clone().negate()
-          : page.camera.getWorldDirection(new THREE.Vector3());
-        const reach = near ? Math.min(PAT_REACH, Math.max(0, near.distance - palmGap() + 0.003)) : PAT_REACH;
-        shown.addScaledVector(toward, reach * Math.sin(Math.PI * t));
-      }
+    // Grabbing: the hand closes (see "hand model") and reaches towards her (or straight
+    // ahead) while the button is held, and lets go when it's released.
+    grip += ((grabbing ? 1 : 0) - grip) * Math.min(1, dt / GRAB_S);
+    if (grip > 0.001) {
+      const toward = near && near.distance < GRAB_REACH + palmGap() ? near.normal.clone().negate()
+        : page.camera.getWorldDirection(new THREE.Vector3());
+      const reach = near ? Math.min(GRAB_REACH, Math.max(0, near.distance - palmGap() + 0.003)) : GRAB_REACH;
+      shown.addScaledVector(toward, reach * grip);
     }
+    closeFingers(grip);
     // Palm towards her when it's close to her, otherwise palm down.
     const facing = near && near.distance < TURNS_TO_HER_WITHIN + palmGap() ? near.normal : new THREE.Vector3(0, 1, 0);
     const k = 1 - Math.exp(-dt * FOLLOW_RATE);
@@ -488,14 +489,21 @@ export function createTouch(page) {
   // ---------- hand model ----------
   // The hand can be a model from the media folder instead of the simple one: an FBX or
   // GLB with a rigged right hand (a glove, say; a pair shows just the right one), with
-  // the texture and bump map picked in the editor. It's turned so its palm faces down
-  // and its fingers point ahead, sized to the hand's Size, and its fingers curled a
-  // little, at rest. Without a model, or if it won't load, the simple hand is used.
+  // the texture and bump map picked in the editor. Anything behind the wrist (a sleeve,
+  // a cuff) is cut off and the opening closed. It's turned so its palm faces down and
+  // its fingers point ahead, sized to the hand's Size, and its fingers curled a little
+  // at rest; grabbing, they close further and the thumb comes under them, like a claw.
+  // Without a model, or if it won't load, the simple hand is used.
   const FINGER_CURL = [8, 14, 10];   // degrees at each finger's three joints, towards the palm
+  const GRAB_CURL = [30, 35, 25];    // ...and this much more, grabbing
+  const THUMB_GRAB = { under: 20, forward: 15, bend: 10 };   // degrees: the thumb grabbing, under
+                                     // the palm, towards the fingertips, and at its other two joints
+  const WRIST_CUT = 0.2;             // cut off this far behind the wrist (a share of wrist to knuckles)
   const HAND_LENGTH = 0.15;          // metres from wrist to fingertip, at the default Size
   const HAND_GLOW = 0x1c1c22;        // a little light of its own, so a dark glove shows in a dim room
   const RIGHT = /(^|[_.\s-])r$|right/i;
   let modelShown = '', modelLoading = null;   // which settings the model on screen was made from
+  let fingers = [];                            // the model's finger joints: [{ bone, rest, grab }] (local turns)
 
   function updateHandModel() {
     const { model, texture, bumpMap } = handSettings();
@@ -506,6 +514,7 @@ export function createTouch(page) {
       if (modelLoading !== wanted) return;   // changed again while it loaded
       for (const child of [...hand.children]) if (child !== simpleHand) child.removeFromParent();
       if (obj) hand.add(obj);
+      fingers = obj?.userData.fingers ?? [];
       simpleHand.visible = !obj;
       modelShown = wanted;
       modelLoading = null;
@@ -539,6 +548,7 @@ export function createTouch(page) {
     if (map || normalMap) {
       right.material = new THREE.MeshStandardMaterial({ map, normalMap, roughness: 0.5, metalness: 0.05, emissive: HAND_GLOW });
     }
+    for (const m of [].concat(right.material)) m.side = THREE.DoubleSide;   // no seeing through a seam
     right.renderOrder = 5;
     right.frustumCulled = false;   // a skinned mesh's bounds don't follow it about
     const holder = new THREE.Group();
@@ -561,7 +571,8 @@ export function createTouch(page) {
     x.addScaledVector(ahead, -x.dot(ahead)).normalize();
     const z = ahead.clone().negate();
     const y = new THREE.Vector3().crossVectors(z, x);
-    curlFingers(bone, x);
+    cutOffBehindWrist(right, wrist, ahead, knuckles);
+    holder.userData.fingers = poseFingers(bone, x, y, z);
     const palm = at(wrist).lerp(at(middle), 0.5);
     const frame = new THREE.Matrix4().makeBasis(x, y, z).setPosition(palm).invert();
     const size = HAND_LENGTH / (knuckles * 2.1);   // wrist to knuckles is a bit under half the hand
@@ -569,21 +580,115 @@ export function createTouch(page) {
       .decompose(loaded.position, loaded.quaternion, loaded.scale);
     return holder;
   }
-  // Each finger's joints turned towards the palm (about the across direction, x).
-  function curlFingers(bone, across) {
-    const fingers = ['index', 'middle', 'ring', '(pinky|little)'];
+  // The fingers' two poses, as each joint's turn: at rest (curled a little) and grabbing.
+  // x, y, z: the hand's directions (towards the little finger, out of the back, back
+  // towards the wrist). Leaves the model at rest.
+  function poseFingers(bone, x, y, z) {
     const joints = [['1', 'proximal'], ['2', 'intermediate'], ['3', 'distal']];
-    const turn = new THREE.Quaternion(), parent = new THREE.Quaternion(), world = new THREE.Quaternion();
-    for (const finger of fingers) {
-      joints.forEach(([n, word], i) => {
-        const b = bone(new RegExp(`${finger}.*(${n}|${word})`, 'i'));
-        if (!b?.parent) return;
-        turn.setFromAxisAngle(across, -THREE.MathUtils.degToRad(FINGER_CURL[i]));
-        b.parent.getWorldQuaternion(parent).invert();
-        b.quaternion.copy(parent.multiply(turn.multiply(b.getWorldQuaternion(world))));
-        b.updateMatrixWorld(true);
-      });
+    const fingerJoints = ['index', 'middle', 'ring', '(pinky|little)'].flatMap(finger =>
+      joints.map(([n, word], i) => ({ i, b: bone(new RegExp(`${finger}.*(${n}|${word})`, 'i')) })));
+    const thumbJoints = joints.map(([n, word], i) => ({ i, b: bone(new RegExp(`thumb.*(${n}|${word}${i === 0 ? '|metacarpal' : ''})`, 'i')) }));
+    const turnBy = (b, axis, degrees) => {   // about a direction of the hand, in place
+      if (!b?.parent || !degrees) return;
+      const turn = new THREE.Quaternion().setFromAxisAngle(axis, THREE.MathUtils.degToRad(degrees));
+      const parent = b.parent.getWorldQuaternion(new THREE.Quaternion()).invert();
+      b.quaternion.copy(parent.multiply(turn.multiply(b.getWorldQuaternion(new THREE.Quaternion()))));
+      b.updateMatrixWorld(true);
+    };
+    // Fingers curl towards the palm about x; the thumb swings under the palm about z and
+    // towards the fingertips about y.
+    for (const { i, b } of fingerJoints) turnBy(b, x, -FINGER_CURL[i]);
+    const all = [...fingerJoints, ...thumbJoints].filter(j => j.b);
+    const posed = all.map(({ b }) => ({ bone: b, rest: b.quaternion.clone() }));
+    for (const { i, b } of fingerJoints) turnBy(b, x, -GRAB_CURL[i]);
+    for (const { i, b } of thumbJoints) {
+      if (i === 0) { turnBy(b, z, THUMB_GRAB.under); turnBy(b, y, -THUMB_GRAB.forward); }
+      else turnBy(b, z, THUMB_GRAB.bend);
     }
+    posed.forEach(p => { p.grab = p.bone.quaternion.clone(); p.bone.quaternion.copy(p.rest); });
+    for (const p of posed) p.bone.updateMatrixWorld(true);
+    return posed;
+  }
+  // How closed the hand is, 0 (at rest) to 1 (grabbing).
+  function closeFingers(amount) {
+    for (const { bone, rest, grab } of fingers) bone.quaternion.slerpQuaternions(rest, grab, amount);
+  }
+  // Everything further than WRIST_CUT behind the wrist is cut off (a cuff, a sleeve, an
+  // arm), and every opening left in the mesh (at the wrist, and any the model had) is
+  // closed with a flat patch, so there's no looking into it.
+  function cutOffBehindWrist(mesh, wrist, ahead, knuckles) {
+    if (mesh.geometry.index) mesh.geometry = mesh.geometry.toNonIndexed();   // one triangle per three vertices
+    const source = mesh.geometry;
+    const position = source.attributes.position, v = new THREE.Vector3(), wristAt = wrist.getWorldPosition(new THREE.Vector3());
+    const along = i => mesh.getVertexPosition(i, v).applyMatrix4(mesh.matrixWorld).sub(wristAt).dot(ahead) / knuckles;
+    const kept = [];
+    for (let t = 0; t < position.count; t += 3) {
+      if (along(t) >= -WRIST_CUT && along(t + 1) >= -WRIST_CUT && along(t + 2) >= -WRIST_CUT) kept.push(t);
+    }
+    // The new mesh: the kept triangles, then the patches.
+    const names = Object.keys(source.attributes);
+    const out = Object.fromEntries(names.map(n => [n, []]));
+    const copy = (i, override = {}) => {
+      for (const n of names) {
+        if (override[n]) { out[n].push(...override[n]); continue; }
+        const a = source.attributes[n];
+        for (let c = 0; c < a.itemSize; c++) out[n].push(a.getComponent(i, c));
+      }
+    };
+    for (const t of kept) { copy(t); copy(t + 1); copy(t + 2); }
+    const vertexAt = i => new THREE.Vector3().fromBufferAttribute(position, i);
+    const meshMiddle = new THREE.Box3().setFromBufferAttribute(position).getCenter(new THREE.Vector3());
+    for (const loop of openings(position, kept)) {
+      // A fan from the opening's middle. Its normal points out of the mesh, and a
+      // small piece of the texture (next to the rim's own) is laid flat across it: the
+      // bump map needs the texture to run across a surface.
+      const middle = loop.reduce((sum, e) => sum.add(vertexAt(e.a)), new THREE.Vector3()).divideScalar(loop.length);
+      const normal = new THREE.Vector3();
+      for (const e of loop) normal.add(new THREE.Vector3().crossVectors(vertexAt(e.a).sub(middle), vertexAt(e.b).sub(middle)));
+      normal.normalize();
+      if (normal.dot(middle.clone().sub(meshMiddle)) < 0) normal.negate();
+      const across1 = new THREE.Vector3(0.3, 1, 0.2).cross(normal).normalize(), across2 = normal.clone().cross(across1);
+      const size = Math.max(...loop.map(e => vertexAt(e.a).distanceTo(middle))) || 1;
+      const uvs = source.attributes.uv, base = loop[0].a;
+      const patch = at => {
+        const o = { normal: normal.toArray() };
+        if (uvs) {
+          const off = at.clone().sub(middle);
+          o.uv = [uvs.getX(base) + off.dot(across1) / size * 0.01, uvs.getY(base) + off.dot(across2) / size * 0.01];
+        }
+        return o;
+      };
+      for (const e of loop) {
+        copy(e.b, patch(vertexAt(e.b)));
+        copy(e.a, patch(vertexAt(e.a)));
+        copy(base, { ...patch(middle), position: middle.toArray() });   // moves with the rim
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    for (const n of names) geometry.setAttribute(n, new THREE.Float32BufferAttribute(out[n], source.attributes[n].itemSize));
+    mesh.geometry = geometry;
+  }
+  // The openings in a mesh (given by its triangles' first vertices): each a loop of the
+  // edges that only one triangle has, [{ a, b }] in order round it.
+  function openings(position, triangles) {
+    const key = i => `${Math.round(position.getX(i) * 1e4)},${Math.round(position.getY(i) * 1e4)},${Math.round(position.getZ(i) * 1e4)}`;
+    const count = new Map();
+    const edges = [];
+    for (const t of triangles) for (let k = 0; k < 3; k++) {
+      const a = t + k, b = t + (k + 1) % 3, ka = key(a), kb = key(b), id = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+      count.set(id, (count.get(id) ?? 0) + 1);
+      edges.push({ a, b, ka, kb, id });
+    }
+    const from = new Map();   // an open edge's start → the edge
+    for (const e of edges) if (count.get(e.id) === 1) from.set(e.ka, e);
+    const loops = [];
+    for (const first of from.values()) {
+      if (first.used) continue;
+      const loop = [];
+      for (let e = first; e && !e.used && loop.length < 10000; e = from.get(e.kb)) { e.used = true; loop.push(e); }
+      if (loop.length >= 3) loops.push(loop);
+    }
+    return loops;
   }
 
   // ---------- shadow ----------
