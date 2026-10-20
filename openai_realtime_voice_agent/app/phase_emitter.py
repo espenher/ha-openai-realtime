@@ -254,6 +254,24 @@ class PhaseEmitter(FrameProcessor):
         await self._emit("listening")
         return True
 
+    async def stopped_by_user(self) -> bool:
+        """The user said "stop" while she was replying (the device has already gone
+        quiet): the reply is over. Drop the rest of it unheard and forget its
+        follow-up, and go idle. Without this the rest of the reply was still spoken
+        to nobody, and when it ended with a question the device chimed and opened
+        its mic a few seconds after the user had stopped her."""
+        if self._current not in ("replying", "thinking"):
+            return False
+        self._barged = True
+        self._cancel_pending_idle()
+        self._cancel_watchdog()
+        self._last_reply_question = False
+        self._follow_up_asked_at = None
+        self._reply_done = False
+        logger.info("🛑 stopped mid-reply → the rest of it dropped, no follow-up")
+        await self._emit("idle")
+        return True
+
     def note_response_start(self) -> None:
         """An assistant response began (LLMFullResponseStartFrame)."""
         self._barged = False
@@ -483,10 +501,14 @@ class PhaseEmitter(FrameProcessor):
             self._tts_active = True
         elif isinstance(frame, TTSStoppedFrame):
             self._tts_active = False
+            self._barged = False   # the interrupted reply's voice is done (its last audio may still be draining)
         elif isinstance(frame, BotStartedSpeakingFrame) and self._barged:
             pass   # the interrupted reply's leftover audio: not a reply to show
         elif isinstance(frame, BotStoppedSpeakingFrame) and self._barged:
-            self._barged = False   # it has drained; the next speech is a real reply
+            # Drained once the voice has nothing more of it to say: an ElevenLabs reply
+            # pauses between sentences, and the next sentence is still the old reply.
+            if not self._tts_active:
+                self._barged = False   # the next speech is a real reply
         elif isinstance(frame, BotStartedSpeakingFrame):
             self._suppress_thinking = False
             if self._follow_up_asked_at is not None and time.monotonic() - self._follow_up_asked_at < 3.0:
