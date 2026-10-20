@@ -1037,7 +1037,7 @@ class Application:
             result = await announce(message)
         except Exception as e:
             result = f"failed ({e!r})"
-        if result != "ok":
+        if not result.startswith("ok"):   # "ok", or "ok (her agent)"
             logger.warning(f"📣 announcement not spoken: {result}")
 
     async def cleanup(self) -> None:

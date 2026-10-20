@@ -204,9 +204,9 @@ def describe_touch() -> str:
     if not touch:
         return ""
     if touch["ongoing"]:
-        return f"Right now, on your screen: {touch['told']}."
+        return f"Right now: {touch['told']}."
     if time.monotonic() - touch["at"] < TOUCH_NOTE_S:
-        return f"A moment ago, on your screen: {touch['told']}."
+        return f"A moment ago: {touch['told']}."
     return ""
 
 

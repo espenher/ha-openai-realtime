@@ -876,10 +876,16 @@ class WebSocketHandler:
 
         phase_emitter.set_stale_speech_handler(_on_stale_speech)
 
-        async def _say_unprompted(prompt: str, wait_s: int) -> str:
-            """Have the assistant speak up out loud without being asked, prompted by
-            `prompt` (a system message). Waits up to `wait_s` seconds for a
-            conversation in progress to finish, else gives up ("busy")."""
+        async def _say_unprompted(prompt: str, wait_s: int, agent_text: str) -> str:
+            """Have the assistant speak up out loud without being asked. Waits up to
+            `wait_s` seconds for a conversation in progress to finish, else gives up
+            ("busy").
+
+            Whoever gives her replies says it, so she's the same persona as always:
+            the realtime model gets `prompt` (a system message); a Home Assistant
+            agent answering for the second persona (ha_agent.py), which holds her
+            own character, gets `agent_text` as a turn marked as not said by the user.
+            """
             if not self._websockets:
                 return "no device connected"
             for _ in range(wait_s):
@@ -888,6 +894,23 @@ class WebSocketHandler:
                 await asyncio.sleep(1)
             if phase_emitter._current not in (None, "idle"):
                 return "busy"
+            if ha_agent is not None:
+                await _sync_agent_mode()   # its switch may have changed since the last wake
+            if AGENT_MODE.active:
+                try:
+                    reply = await ha_agent.ask(agent_text, avatar_instructions(for_agent=True), describe_activity())
+                except Exception as e:
+                    logger.warning(f"🧠 the agent couldn't speak up: {e!r}")
+                    return "agent failed"
+                if not reply:
+                    return "the agent had nothing to say"
+                if phase_emitter._current not in (None, "idle"):   # someone started talking meanwhile
+                    return "busy"
+                phase_emitter.note_device_mic_closed()
+                await self.broadcast_phase("listening")
+                await self.broadcast_phase("replying")
+                await agent_replies.speak(reply)
+                return "ok (her agent)"
             _announcing["v"] = True
             if agent_replies is not None:
                 agent_replies.let_realtime_reply()
@@ -926,8 +949,9 @@ class WebSocketHandler:
                 "to Espen now, unprompted, in one or two short sentences, in "
                 f"character. Don't ask a question. Notification: {message}",
                 wait_s=60,
+                agent_text=f"(Not said by the user: a Home Assistant notification to tell Espen about now.) {message}",
             )
-            if result == "ok":
+            if result.startswith("ok"):
                 logger.info(f"📣 announcement: {message[:120]}")
             return result
 
@@ -1048,9 +1072,9 @@ class WebSocketHandler:
             await _refresh_avatar_instructions()
             if speak and PERSONA_STATE.active == SECOND:
                 result = await _say_unprompted(
-                    f"On your screen, {touch['told']}. Nobody spoke to you; react to it out "
-                    "loud now, in character, in one short sentence.",
+                    f"Nobody spoke to you. This just happened to you: {touch['told']}. React to it out loud.",
                     wait_s=0,
+                    agent_text=f"(Not said by the user. This just happened to you: {touch['told']}.)",
                 )
                 logger.info(f"🖐 she reacts out loud: {result}")
             if not touch["ongoing"]:
