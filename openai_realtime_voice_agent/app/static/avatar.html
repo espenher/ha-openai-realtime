@@ -63,6 +63,9 @@
                flex-direction: column; gap: 4px; }
   .touchKind legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
   #touchEditor input.w { width: 64px; flex: 0 0 64px; }
+  #touchEditor h3 { font-size: 12px; margin: 6px 0 0; }
+  #touchEditor label { display: flex; gap: 5px; align-items: center; background: #2b2f38; border: 1px solid var(--line);
+                       border-radius: 6px; padding: 4px 8px; cursor: pointer; }
 </style>
 </head>
 <body class="viewing">
@@ -70,7 +73,7 @@
 <div id="status">Connecting…</div>
 <div id="debug"></div>
 <button id="editToggle" title="Edit the room (M)">✎ Edit room</button>
-<button id="handToggle" title="A hand to touch her with (H): press and hold to touch">🖐</button>
+<button id="handToggle" title="A hand to touch her with (H): the mouse moves it, the scroll wheel nearer and further, a click pats">🖐</button>
 
 <div id="editor">
   <h1>Room editor</h1>
@@ -2670,7 +2673,8 @@ renderer.setAnimationLoop(() => {
 window.avatar = { scene, camera, roomGroup, get layout() { return layout; }, get active() { return active; }, get book() { return book; },
   sit: () => active && goSit(active), stand: () => active && goHome(active),
   gesture: (name, seconds, start) => active && playGesture(active, name, seconds, start),
-  message: msg => onMessage(msg) };   // test hook: as if the add-on had sent it
+  message: msg => onMessage(msg),   // test hook: as if the add-on had sent it
+  get touch() { return touch; } };
 
 boot().catch(e => setStatus(`Failed to start: ${e.message}`));
 </script>
