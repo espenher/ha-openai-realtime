@@ -1,5 +1,6 @@
 """Simple serializer for raw binary PCM audio frames."""
 import json
+from array import array
 import logging
 import os
 from pipecat.frames.frames import InputAudioRawFrame, OutputAudioRawFrame, Frame
@@ -50,6 +51,10 @@ class RawAudioSerializer(FrameSerializer):
         # Resets the dangling-VAD guard's "speech since wake" tracker. Set by
         # WebSocketHandler.build_pipeline.
         self._on_wake = None
+        # Mic audio since the last take_mic_stats(): bytes and the loudest sample,
+        # for the wake report (did the device's audio actually arrive?).
+        self._mic_bytes = 0
+        self._mic_peak = 0
         # Optional no-arg predicate: while it returns True, reply audio is dropped
         # instead of sent (what's left of a reply the user woke the device over).
         self._drop_output = None
@@ -69,6 +74,13 @@ class RawAudioSerializer(FrameSerializer):
     def set_mic_flush_handler(self, handler):
         """Register the async no-arg callback fired on a device 'flush'."""
         self._on_mic_flush = handler
+
+    def take_mic_stats(self) -> tuple[float, float]:
+        """Seconds of mic audio and its loudest sample (0..1) since the last call; resets both."""
+        seconds = self._mic_bytes / 2 / (self._input_sample_rate or 16000)
+        peak = self._mic_peak / 32768
+        self._mic_bytes = self._mic_peak = 0
+        return seconds, peak
 
     def set_wake_handler(self, handler):
         """Register the async no-arg callback fired on a device 'wake'."""
@@ -151,6 +163,12 @@ class RawAudioSerializer(FrameSerializer):
         if len(message) % 2 != 0:
             logger.warning(f"⚠️ Received audio with odd byte count: {len(message)} bytes, skipping")
             return None
+
+        self._mic_bytes += len(message)
+        samples = array("h")
+        samples.frombytes(message)
+        if samples:
+            self._mic_peak = max(self._mic_peak, max(samples), -min(samples))
 
         # Create InputAudioRawFrame at the device's mic rate; the InputResampler
         # processor (right after transport.input()) upsamples it to 24 kHz.

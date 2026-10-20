@@ -86,6 +86,60 @@ class SafeRealtimeLLMService(OpenAIRealtimeLLMService):
     async def _truncate_current_audio_response(self):  # type: ignore[override]
         return
 
+    # ---- the check at each wake (websocket_handler: _check_openai_at_wake) ----
+    # After a long quiet spell the OpenAI socket can stall without closing: the
+    # user's words then reached OpenAI (or its answers came back) ~50 s late, long
+    # after the device had given up (2026-10-20 03:15). At a wake the user's audio
+    # is held back for a moment while the socket is pinged; if it doesn't answer,
+    # the session is reconnected first and the held audio sent after, in order.
+    _held_audio = None
+    heard_at = None          # when OpenAI last reported speech starting (monotonic)
+    audio_sent_bytes = 0     # user audio actually sent to OpenAI (24 kHz, 16-bit)
+
+    async def _send_user_audio(self, frame):  # type: ignore[override]
+        if self._held_audio is not None:
+            self._held_audio.append(frame)
+            return
+        self.audio_sent_bytes += len(frame.audio)
+        await super()._send_user_audio(frame)
+
+    def hold_audio(self):
+        """Keep the user's audio back, in order, until release_audio()."""
+        if self._held_audio is None:
+            self._held_audio = []
+
+    async def release_audio(self) -> int:
+        """Send the held audio (and anything arriving meanwhile) and stop holding."""
+        sent = 0
+        try:
+            while self._held_audio:
+                frame = self._held_audio.pop(0)
+                self.audio_sent_bytes += len(frame.audio)
+                await super()._send_user_audio(frame)
+                sent += 1
+        finally:
+            self._held_audio = None   # never left holding, even if a send failed
+        return sent
+
+    async def ping_rtt(self, timeout: float):
+        """Round trip to OpenAI over the live socket, in seconds; None if it didn't answer."""
+        ws = self._websocket
+        if ws is None:
+            return None
+        t0 = time.monotonic()
+
+        async def ping():   # sending can hang on a stalled socket too, not just the answer
+            await (await ws.ping())
+        try:
+            await asyncio.wait_for(ping(), timeout)
+            return time.monotonic() - t0
+        except Exception:
+            return None
+
+    async def _handle_evt_speech_started(self, evt):  # type: ignore[override]
+        self.heard_at = time.monotonic()
+        await super()._handle_evt_speech_started(evt)
+
     async def reset_conversation(self):  # type: ignore[override]
         """Reconnect WITHOUT forcing a response on the reconnected session.
 

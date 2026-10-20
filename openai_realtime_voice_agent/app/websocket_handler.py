@@ -116,6 +116,13 @@ class InputResampler(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+# The check at each wake (_check_openai_at_wake): how long OpenAI gets to answer a
+# ping before the session is reconnected, and when the wake's report is logged (the
+# device gives up on a turn after about 7 s without speech).
+WAKE_PING_TIMEOUT_S = 1.5
+WAKE_REPORT_S = 8.0
+
+
 class ConnectionRecovery(FrameProcessor):
     """Auto-reconnect the OpenAI Realtime session when its WebSocket dies.
 
@@ -491,13 +498,14 @@ class WebSocketHandler:
             request_follow_up=self.broadcast_request_follow_up if self.follow_up_ms == 0 else None,
         )
 
+        recovery = ConnectionRecovery(openai_service=openai_service, emit_idle=self.broadcast_phase,
+                                      phase_emitter=phase_emitter)
         pipeline_components = [
             transport.input(),
             # Watch for OpenAI connection-death ErrorFrames (they travel upstream
             # to the task source, so place this upstream of the service) and
             # reconnect in place. Without it a 1011/1001 drop bricks the session.
-            ConnectionRecovery(openai_service=openai_service, emit_idle=self.broadcast_phase,
-                               phase_emitter=phase_emitter),
+            recovery,
             InputResampler(out_rate=PIPELINE_SAMPLE_RATE),
             input_activity_tracker,
         ]
@@ -781,7 +789,53 @@ class WebSocketHandler:
             except Exception as e:
                 logger.debug(f"🧽 mic-flush input clear no-op ({e!r})")
 
+        async def _check_openai_at_wake():
+            """Make sure OpenAI is really listening, then report how the wake went.
+
+            The user's audio is held back while the OpenAI socket is pinged; no answer
+            within WAKE_PING_TIMEOUT_S means it has stalled, so the session is
+            reconnected (without touching the device, whose mic stays open) and the
+            held audio sent after. WAKE_REPORT_S later one line says what happened:
+            the ping, how much mic audio came in from the device and how loud, how
+            much went on to OpenAI, and whether (and when) OpenAI heard speech.
+            """
+            woke = time.monotonic()
+            self._serializer.take_mic_stats()
+            openai_service.heard_at = None
+            sent_before = openai_service.audio_sent_bytes
+            openai_service.hold_audio()
+            rtt, reconnected = None, ""
+            try:   # the held audio always goes on, whatever happens here
+                rtt = await openai_service.ping_rtt(WAKE_PING_TIMEOUT_S)
+                if rtt is None and not recovery._reconnecting:
+                    logger.warning("🩺 OpenAI didn't answer a ping at wake → reconnecting now (the user's audio is held)")
+                    recovery._reconnecting = True
+                    t0 = time.monotonic()
+                    try:
+                        await openai_service.reset_conversation()
+                        recovery._connected_at = time.monotonic()
+                        for _ in range(30):   # until the new session is ready for audio
+                            if getattr(openai_service, "_api_session_ready", False):
+                                break
+                            await asyncio.sleep(0.1)
+                        reconnected = f", reconnected in {time.monotonic() - t0:.1f}s"
+                    except Exception as e:
+                        reconnected = f", reconnect failed ({e!r})"
+                    finally:
+                        recovery._reconnecting = False
+            finally:
+                await openai_service.release_audio()
+            await asyncio.sleep(max(0.0, WAKE_REPORT_S - (time.monotonic() - woke)))
+            mic_s, peak = self._serializer.take_mic_stats()
+            sent_s = (openai_service.audio_sent_bytes - sent_before) / 2 / PIPELINE_SAMPLE_RATE
+            heard = openai_service.heard_at
+            heard_txt = f"heard speech after {heard - woke:.1f}s" if heard and heard >= woke else "heard NO speech"
+            ping_txt = f"{rtt * 1000:.0f} ms" if rtt is not None else "no answer"
+            logger.info(f"🩺 wake: OpenAI ping {ping_txt}{reconnected}; mic in {mic_s:.1f}s "
+                        f"(loudest {peak:.0%}), sent to OpenAI {sent_s:.1f}s; OpenAI {heard_txt}")
+
         async def _on_device_wake():
+            asyncio.create_task(_check_openai_at_wake())
             AVATAR.send({"type": "wake"})
             if agent_replies is not None:
                 asyncio.create_task(_sync_agent_mode())
