@@ -51,6 +51,18 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #0b1020; font-weight: 600; }
   button.danger { color: var(--danger); }
   #selName { font-weight: 600; word-break: break-all; }
+  #handToggle { position: fixed; top: 52px; right: 10px; opacity: 0; transition: opacity .3s; }
+  body:not(.viewing) #handToggle, #handToggle:hover, body.hand #handToggle { opacity: 1; }
+  body.hand #handToggle { background: var(--accent); border-color: var(--accent); }
+  body.editing #handToggle { display: none; }
+  body.hand:not(.editing) #stage { cursor: none; }
+  #touchReadout { position: fixed; left: 12px; bottom: 30px; padding: 6px 10px; border-radius: 8px;
+                  background: rgba(0,0,0,.6); font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; }
+  #touchEditor { display: flex; flex-direction: column; gap: 6px; }
+  .touchKind { border: 1px solid var(--line); border-radius: 8px; padding: 6px; margin: 0; display: flex;
+               flex-direction: column; gap: 4px; }
+  .touchKind legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+  #touchEditor input.w { width: 64px; flex: 0 0 64px; }
 </style>
 </head>
 <body class="viewing">
@@ -58,6 +70,7 @@
 <div id="status">Connecting…</div>
 <div id="debug"></div>
 <button id="editToggle" title="Edit the room (M)">✎ Edit room</button>
+<button id="handToggle" title="A hand to touch her with (H): press and hold to touch">🖐</button>
 
 <div id="editor">
   <h1>Room editor</h1>
@@ -116,6 +129,10 @@
     <div class="row" style="margin-top:6px"><button id="addMood">+ Mood</button><button id="addGesture">+ Gesture</button>
       <button id="resetActions">Reset to defaults</button></div>
   </details>
+  <h2>Touch</h2>
+  <p>Where she can be touched with the 🖐 hand, and what each kind of touch means to her there. Each zone is a bubble
+     riding on one of her bones.</p>
+  <div id="touchEditor"></div>
   <h2>Wardrobe</h2>
   <div class="row" id="wardrobe"><p>No separate clothing parts on this model.</p></div>
   <h2>Appearance</h2>
@@ -174,6 +191,7 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, VRMLookAtQuaternionProxy, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
+import { createTouch } from './static/touch.js';
 
 const params = new URLSearchParams(location.search);
 const MOUTH_DELAY = Number(params.get('delay') ?? 450) / 1000;
@@ -2089,6 +2107,11 @@ async function mergeBodyState() {
 
 // ---------- editor ----------
 let editing = false, selected = null;
+// Besides room parts, furniture and spots, the editor can select things other parts of
+// the page register here (touch zones, from touch.js): how to name one in Selected,
+// what to do when it's picked, moved or removed, and where to find them for clicking.
+const editorKinds = new Map();   // kind → { label(obj), selected(obj), moved(obj), removed(obj) }
+const editorPickables = [];      // groups/objects to look in when clicking
 const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.enabled = false;
 const gizmo = new TransformControls(camera, renderer.domElement);
@@ -2117,6 +2140,7 @@ function setEditing(on) {
     fillSelect($('charDance'), ['(automatic)', ...(active ? active.actions.keys() : [])], layout.character?.dance || '(automatic)');
     $('charIdleAfter').value = idleAfter();
     [$('charIdleMin').value, $('charIdleMax').value] = idleChange();
+    touch.editorOpened();
   } else {
     select(null);
     applyViewCamera();
@@ -2129,8 +2153,10 @@ function select(obj) {
   selected = obj;
   if (obj) { gizmo.attach(obj); gizmo.getHelper().visible = true; } else { gizmo.detach(); gizmo.getHelper().visible = false; }
   const d = obj?.userData;
-  $('selName').textContent = !d ? 'Nothing' : d.kind === 'roomPart' ? `Room: ${d.key}`
+  const kind = editorKinds.get(d?.kind);
+  $('selName').textContent = !d ? 'Nothing' : kind ? kind.label(obj) : d.kind === 'roomPart' ? `Room: ${d.key}`
     : d.kind === 'item' ? `Furniture: ${d.file}` : `Spot: ${spotOf(d.id) ? spotLabel(spotOf(d.id)) : ''}`;
+  kind?.selected?.(obj);
   const isSpot = d?.kind === 'spot';
   $('itemProps').style.display = d?.kind === 'item' ? '' : 'none';
   if (d?.kind === 'item') {
@@ -2182,7 +2208,7 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;   // that was a drag
   const pointer = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects([spotsGroup, itemsGroup, roomGroup], true);
+  const hits = raycaster.intersectObjects([...editorPickables, spotsGroup, itemsGroup, roomGroup], true);
   const under = [];
   for (const hit of hits) {
     let o = hit.object;
@@ -2199,7 +2225,8 @@ renderer.domElement.addEventListener('pointerup', e => {
 gizmo.addEventListener('objectChange', () => {
   const d = selected?.userData;
   if (!d) return;
-  if (d.kind === 'spot') {
+  if (editorKinds.has(d.kind)) editorKinds.get(d.kind).moved(selected);
+  else if (d.kind === 'spot') {
     const s = spotOf(d.id);
     s.position = toArr(selected.position);
     s.rotationY = Math.round(selected.rotation.y * 10000) / 10000;
@@ -2216,6 +2243,7 @@ $('removeBtn').onclick = removeSelected;
 function removeSelected() {
   const d = selected?.userData;
   if (!d) return;
+  if (editorKinds.has(d.kind)) { editorKinds.get(d.kind).removed(selected); return; }
   if (d.kind === 'roomPart') {
     layout.room.objects ??= {};
     layout.room.objects[d.key] = { ...layout.room.objects[d.key], hidden: true };
@@ -2353,6 +2381,7 @@ addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if (k === 'd') debugOn = !debugOn;
   else if (k === 'm') setEditing(!editing);
+  else if (k === 'h' && !editing) touch.setHand(!touch.handOn);
   else if (editing && k === 'g') setMode('translate');
   else if (editing && k === 'r') setMode('rotate');
   else if (editing && k === 's') setMode('scale');
@@ -2581,6 +2610,19 @@ function connect() {
 
 // ---------- loop ----------
 const clock = new THREE.Clock();
+// ---------- touch (touch.js): the 🖐 hand and the zones she feels it in ----------
+const touch = createTouch({
+  scene, camera, canvas: renderer.domElement,
+  active: () => active,
+  layout: () => layout,
+  editing: () => editing,
+  moodTags: () => (workActions || catalogue).filter(a => a.kind === 'mood').map(a => a.tag),
+  pickables: () => [roomGroup, itemsGroup],
+  registerEditorKind: (kind, handlers) => editorKinds.set(kind, handlers),
+  selectInEditor: obj => { if (editing) select(obj); },
+});
+$('handToggle').onclick = () => touch.setHand(!touch.handOn);
+
 let nextBlink = 2, blinkT = -1;
 renderer.setAnimationLoop(() => {
   const dt = clock.getDelta();
@@ -2620,6 +2662,7 @@ renderer.setAnimationLoop(() => {
     debugEl.style.display = 'block';
     debugEl.textContent = `persona  ${activePersona}\nphase    ${lastPhase}\nanim     ${active?.current}\nmood     ${active?.mood || '-'}\nmouth    ${mouth.toFixed(2)}\nroom     ${layout.room?.file || '-'}\nspots    ${(layout.spots || []).length}`;
   } else debugEl.style.display = 'none';
+  touch.update(dt);
   renderer.render(scene, camera);
 });
 

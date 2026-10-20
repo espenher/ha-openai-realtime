@@ -150,6 +150,7 @@ class AvatarHub:
         await asyncio.to_thread(self._move_old_uploads)
         app = web.Application(client_max_size=MAX_UPLOAD_BYTES)
         app.router.add_get("/", self._index)
+        app.router.add_get("/static/{name}", self._static)
         app.router.add_get("/files", self._list_files)
         app.router.add_get("/files/{name}", self._file)
         app.router.add_put("/files/{name}", self._upload)
@@ -225,6 +226,14 @@ class AvatarHub:
 
     async def _index(self, request: web.Request) -> web.StreamResponse:
         return web.FileResponse(STATIC_DIR / "avatar.html", headers={"Cache-Control": "no-cache"})
+
+    async def _static(self, request: web.Request) -> web.StreamResponse:
+        """The page's own script modules (touch.js), next to avatar.html."""
+        name = request.match_info["name"]
+        if not re.fullmatch(r"[\w-]+\.js", name) or not (STATIC_DIR / name).is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(STATIC_DIR / name, headers={"Cache-Control": "no-cache",
+                                                            "Content-Type": "text/javascript"})
 
     async def _list_files(self, request: web.Request) -> web.Response:
         directory = self._media_dir()
