@@ -109,6 +109,13 @@
       <option value="asked">when asked to sit</option>
       <option value="idle">idle (by herself)</option>
     </select></div>
+    <div class="row" id="spotPostureRow" title="How she's placed here: [lie down] picks a spot where she's lying, [sit down] one where she isn't">
+      Posture <select id="spotPosture">
+      <option value="">automatic (from the animation's name)</option>
+      <option value="sitting">sitting</option>
+      <option value="lying">lying down</option>
+      <option value="kneeling">kneeling</option>
+    </select></div>
     <div class="row" id="spotDoingRow" title="What she's doing here, as she'd say it: she's told this when asked what she's up to">
       <input id="spotDoing" type="text" placeholder="Doing here, e.g. lying on the sofa reading"></div>
     <div class="row" id="spotLeanRow" title="Tilts her back (or forward, below 0) around her hips while she sits here">
@@ -1232,15 +1239,31 @@ const idleChange = () => layout.character?.idleChange ?? IDLE_CHANGE_MIN;
 const WALK_SPEED = 0.7;       // metres per second at Size 1 (without a walk animation to measure)
 const TURN_SPEED = 3.5;       // radians per second
 const SIT_WORDS = new Set(['sit down', 'sit', 'go sit', 'take a seat', 'sit in your chair']);
+const LIE_WORDS = new Set(['lie down', 'lay down', 'lie', 'go lie down', 'lie on the sofa', 'lie on the couch']);
 const STAND_WORDS = new Set(['stand up', 'get up', 'stand']);
 const sitSpots = () => (layout.spots || []).filter(s => s.type === 'sit');
 const isIdleSpot = s => (s.use || 'both') !== 'asked';
+// How she's placed at a sit spot: its Posture from the editor ('sitting', 'lying',
+// 'kneeling'), or guessed from the animation's name. The add-on guesses the same way
+// for what she's told she's doing (avatar_body.py, POSTURES).
+const POSTURE_GUESSES = [[/prone|lying|laying|lie\b|lay\b/i, 'lying'], [/kneel/i, 'kneeling']];
+function spotPosture(spot) {
+  if (spot.posture) return spot.posture;
+  return POSTURE_GUESSES.find(([pattern]) => pattern.test(spot.animation || ''))?.[1] ?? 'sitting';
+}
 // A sit spot for being asked to sit or for idling ('asked' / 'idle'): another than the
 // one she's in, at random (that one if it's the only one; any sit spot if none is
-// meant for it).
-function pickSitSpot(ch, use = 'asked') {
-  const meant = sitSpots().filter(s => (s.use || 'both') === use || (s.use || 'both') === 'both');
-  const all = meant.length ? meant : sitSpots(), others = all.filter(s => s.id !== ch.sitSpotId);
+// meant for it). Asked to lie down ('lying'), only a spot where she lies (none: null);
+// asked to sit ('sitting'), one where she doesn't, if there is one.
+function pickSitSpot(ch, use = 'asked', posture = null) {
+  let spots = sitSpots();
+  if (posture) {
+    const fitting = spots.filter(s => (spotPosture(s) === 'lying') === (posture === 'lying'));
+    if (posture === 'lying' && !fitting.length) return null;
+    if (fitting.length) spots = fitting;
+  }
+  const meant = spots.filter(s => (s.use || 'both') === use || (s.use || 'both') === 'both');
+  const all = meant.length ? meant : spots, others = all.filter(s => s.id !== ch.sitSpotId);
   const from = others.length ? others : all;
   return from[Math.floor(Math.random() * from.length)];
 }
@@ -1284,7 +1307,8 @@ const angleTo = (from, to) => Math.atan2(Math.sin(to - from), Math.cos(to - from
 function activityTag(ch, tag) {
   if (DANCE_WORDS.has(tag)) { goDance(ch); return true; }
   if (STOP_DANCE_WORDS.has(tag)) { stopDance(ch); return true; }
-  if (SIT_WORDS.has(tag)) { goSit(ch, pickSitSpot(ch, 'asked'), false); return true; }
+  if (SIT_WORDS.has(tag)) { goSit(ch, pickSitSpot(ch, 'asked', 'sitting'), false); return true; }
+  if (LIE_WORDS.has(tag)) { goSit(ch, pickSitSpot(ch, 'asked', 'lying'), false); return true; }
   if (STAND_WORDS.has(tag)) { goHome(ch); return true; }
   return false;
 }
@@ -2112,6 +2136,8 @@ function select(obj) {
     $('spotLeanRow').style.display = s.type === 'sit' ? '' : 'none';
     $('spotUseRow').style.display = s.type === 'sit' ? '' : 'none';
     $('spotUse').value = s.use || 'both';
+    $('spotPostureRow').style.display = s.type === 'sit' ? '' : 'none';
+    $('spotPosture').value = s.posture || '';
     $('spotLean').value = s.lean || 0;
     $('spotDoingRow').style.display = s.type === 'sit' ? '' : 'none';
     $('spotDoing').value = s.doing || '';
@@ -2254,6 +2280,10 @@ $('spotUse').onchange = e => {
   const s = spotOf(selected.userData.id);
   if (e.target.value === 'both') delete s.use; else s.use = e.target.value;
   listSpots();
+};
+$('spotPosture').onchange = e => {
+  const s = spotOf(selected.userData.id);
+  if (e.target.value) s.posture = e.target.value; else delete s.posture;
 };
 $('spotDoing').oninput = e => {
   const s = spotOf(selected.userData.id);

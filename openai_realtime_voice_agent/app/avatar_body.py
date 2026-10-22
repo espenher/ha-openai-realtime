@@ -151,10 +151,20 @@ def _can_dance(layout: dict) -> bool:
     return (layout.get("character") or {}).get("dance") in animations or any("dance" in a.lower() for a in animations)
 
 
-# How she's placed in an animation, from its name (when a spot has no "Doing" text).
-POSTURES = ((re.compile(r"prone|lying|laying|lie\b|lay\b", re.I), "lying down"),
+# How she's placed at a sit spot: its Posture from the editor, else guessed from its
+# animation's name (the avatar page guesses the same way, spotPosture).
+POSTURES = ((re.compile(r"prone|lying|laying|lie\b|lay\b", re.I), "lying"),
             (re.compile(r"kneel", re.I), "kneeling"),
             (re.compile(r"stand", re.I), "standing"))
+POSTURE_WORDS = {"sitting": "sitting", "lying": "lying down", "kneeling": "kneeling", "standing": "standing"}
+
+
+def spot_posture(spot: dict) -> str:
+    """'sitting', 'lying', 'kneeling' (or 'standing')."""
+    if spot.get("posture") in POSTURE_WORDS:
+        return spot["posture"]
+    animation = spot.get("animation") or ""
+    return next((posture for pattern, posture in POSTURES if pattern.search(animation)), "sitting")
 
 
 def describe_spot(spot: dict | None, layout: dict) -> str:
@@ -167,7 +177,7 @@ def describe_spot(spot: dict | None, layout: dict) -> str:
     if doing:
         return doing[0].upper() + doing[1:] + "." if re.match(r"(?i)you(?:'re| are)\b", doing) else f"You're {doing}."
     animation = spot.get("animation") or ""
-    posture = next((words for pattern, words in POSTURES if pattern.search(animation)), "sitting")
+    posture = POSTURE_WORDS[spot_posture(spot)]
     book = any(item.get("withSpot") == spot.get("id") and "book" in (item.get("file") or "").lower()
                for item in layout.get("items") or [])
     reading = ", reading a book" if book or re.search(r"read", animation, re.I) else ""
@@ -293,9 +303,11 @@ def avatar_instructions(for_agent: bool = False) -> str:
         parts.append("\n\nGestures (a short movement, done once where you put the tag). Use one only when it "
                      "really fits, at most one or two per reply:\n" + "\n".join(map(line, gestures)))
     # The avatar page walks her to the room's sit spot and back (and does so by itself after a quiet spell).
-    if any(spot.get("type") == "sit" for spot in layout.get("spots") or []):
-        parts.append("\n\nMoving around: [sit down] walk over and sit in your chair; [stand up] get up and come "
-                     "back to your spot. You also go and sit by yourself when nobody has talked to you for a while.")
+    sit_spots = [spot for spot in layout.get("spots") or [] if spot.get("type") == "sit"]
+    if sit_spots:
+        lie = "; [lie down] go and lie down" if any(spot_posture(spot) == "lying" for spot in sit_spots) else ""
+        parts.append(f"\n\nMoving around: [sit down] go and sit down{lie}; [stand up] get up and come back to "
+                     "your spot. You also go and sit by yourself when nobody has talked to you for a while.")
     # The page loops her dance (the one picked in the editor, else one with "dance" in its name) until told to stop.
     if _can_dance(layout):
         parts.append("\n\nDancing: [start dancing] you dance, and keep dancing while you talk, until [stop dancing]. "
