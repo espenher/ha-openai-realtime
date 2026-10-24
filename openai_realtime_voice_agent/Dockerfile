@@ -28,12 +28,18 @@ RUN apt-get update \
         libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the app and its dependencies from pyproject (PEP 517 via poetry-core).
-# No poetry.lock is used, matching upstream behaviour; on glibc this resolves
-# to wheels and needs no native LLVM/cmake build.
+# The dependencies from pyproject (PEP 517 via poetry-core). No poetry.lock is
+# used, matching upstream behaviour; on glibc this resolves to wheels and needs
+# no native LLVM/cmake build.
+# Only pyproject.toml goes in here, with an empty stand-in for the app package
+# (poetry wants to see it), and the stand-in is uninstalled again: so this big
+# layer is only rebuilt when the dependencies change. With the app's code in it,
+# every update reinstalled everything, and Docker's build cache kept each old
+# copy (6 GB of it by 2026-10-24, filling Home Assistant's disk).
 COPY pyproject.toml /tmp/app_build/pyproject.toml
-COPY app/ /tmp/app_build/app/
-RUN pip3 install /tmp/app_build \
+RUN mkdir -p /tmp/app_build/app && touch /tmp/app_build/app/__init__.py \
+    && pip3 install /tmp/app_build \
+    && pip3 uninstall -y openai-realtime-voice-agent \
     && rm -rf /tmp/app_build
 
 # App code (kept at /app for `python3 -m app.main` and easy inspection)
