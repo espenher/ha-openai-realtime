@@ -123,6 +123,7 @@ const copy = value => JSON.parse(JSON.stringify(value));
 //   active()          the character on screen ({ vrm, root }), or null
 //   layout()          the layout object (saved with Save room)
 //   editing()         whether the room editor is open
+//   markersShown()    whether the editor shows its markers (the bubbles are among them)
 //   moodTags()        the mood tags from the editor's Moods & gestures list
 //   pickables()       the room and furniture (for placing the hand and its shadow)
 //   files()           the media folder's file names (for picking a hand model)
@@ -1108,7 +1109,7 @@ export function createTouch(page) {
     const now = performance.now() / 1000;
     if (page.editing() && mouseLocked()) document.exitPointerLock();
     if (page.active() !== builtFor || zones() !== builtFrom) rebuild();
-    for (const { mesh } of bubbles) mesh.visible = page.editing();
+    for (const { mesh } of bubbles) mesh.visible = page.markersShown();
     updateHandModel();
     const near = fly(dt, now);
     page.lookAt(contact && hand.visible ? hand.position : null);

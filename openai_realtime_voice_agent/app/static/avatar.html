@@ -55,6 +55,9 @@
   body:not(.viewing) #handToggle, #handToggle:hover, body.hand #handToggle { opacity: 1; }
   body.hand #handToggle { background: var(--accent); border-color: var(--accent); }
   body.editing #handToggle { display: none; }
+  #markersToggle { position: fixed; top: 10px; left: 10px; display: none; }
+  body.editing #markersToggle { display: block; }
+  body.editing.noMarkers #markersToggle { background: var(--accent); border-color: var(--accent); }
   body.hand:not(.editing) #stage { cursor: none; }
   #touchReadout { position: fixed; left: 12px; bottom: 30px; padding: 6px 10px; border-radius: 8px;
                   background: rgba(0,0,0,.6); font-size: 13px; opacity: 0; transition: opacity .3s; pointer-events: none; }
@@ -75,7 +78,8 @@
 <div id="status">Connecting…</div>
 <div id="debug"></div>
 <button id="editToggle" title="Edit the room (M)">✎ Edit room</button>
-<button id="handToggle" title="A hand to touch her with (H): the mouse moves it, the scroll wheel nearer and further, a click pats">🖐</button>
+<button id="handToggle" title="A hand to touch her with (H): the mouse moves it, the scroll wheel nearer and further, hold the left button to grab">🖐</button>
+<button id="markersToggle" title="Hide the spots, touch zones, handles and spot-only furniture, to see the room as it is (V)">👁 Hide markers</button>
 
 <div id="editor">
   <h1>Room editor</h1>
@@ -1120,7 +1124,7 @@ function updateSpotItems() {
     const item = (layout.items || []).find(i => i.id === wrap.userData.id);
     if (!item?.withSpot) continue;
     const here = active?.away === 'sit' && !active.move && active.sitSpotId === item.withSpot;
-    wrap.visible = editing || here;
+    wrap.visible = markersShown() || here;
     if (here && BOOK_FILE.test(item.file)) spotItemAt = wrap.localToWorld(wrap.userData.center.clone());
   }
 }
@@ -1149,7 +1153,7 @@ function spotMarker(spot) {
 function loadSpots() {
   spotsGroup.clear();
   for (const spot of layout.spots || []) spotsGroup.add(spotMarker(spot));
-  spotsGroup.visible = editing;
+  spotsGroup.visible = markersShown();
   listSpots();
 }
 // The spots by name (or type and animation), to pick one that's hard to click.
@@ -2066,6 +2070,19 @@ async function mergeBodyState() {
 
 // ---------- editor ----------
 let editing = false, selected = null;
+// In the editor, the markers (spots, touch zones, the move/turn/scale handles, and
+// furniture that only shows at a spot) can be hidden to see the room as it is; they
+// can't be clicked while hidden.
+let markersHidden = false;
+const markersShown = () => editing && !markersHidden;
+function setMarkersHidden(hidden) {
+  markersHidden = hidden;
+  document.body.classList.toggle('noMarkers', hidden);
+  $('markersToggle').textContent = hidden ? '👁 Show markers' : '👁 Hide markers';
+  spotsGroup.visible = markersShown();
+  gizmo.getHelper().visible = !!selected && markersShown();
+  gizmo.enabled = markersShown();
+}
 // Besides room parts, furniture and spots, the editor can select things other parts of
 // the page register here (touch zones, from touch.js): how to name one in Selected,
 // what to do when it's picked, moved or removed, and where to find them for clicking.
@@ -2082,7 +2099,8 @@ function setEditing(on) {
   document.body.classList.toggle('editing', on);
   document.body.classList.toggle('viewing', !on);
   orbit.enabled = on;
-  spotsGroup.visible = on;
+  spotsGroup.visible = on && !markersHidden;
+  gizmo.enabled = on && !markersHidden;
   if (on) {
     orbit.target.copy(shots.wideTarget());
     orbit.update();
@@ -2105,11 +2123,12 @@ function setEditing(on) {
   }
 }
 $('editToggle').onclick = () => setEditing(true);
+$('markersToggle').onclick = () => setMarkersHidden(!markersHidden);
 $('exitEdit').onclick = () => setEditing(false);
 
 function select(obj) {
   selected = obj;
-  if (obj) { gizmo.attach(obj); gizmo.getHelper().visible = true; } else { gizmo.detach(); gizmo.getHelper().visible = false; }
+  if (obj) { gizmo.attach(obj); gizmo.getHelper().visible = markersShown(); } else { gizmo.detach(); gizmo.getHelper().visible = false; }
   const d = obj?.userData;
   const kind = editorKinds.get(d?.kind);
   $('selName').textContent = !d ? 'Nothing' : kind ? kind.label(obj) : d.kind === 'roomPart' ? `Room: ${d.key}`
@@ -2168,8 +2187,8 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;   // that was a drag
   const pointer = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(pointer, camera);
-  const registered = [...editorKinds.values()].flatMap(kind => kind.pickables?.() ?? []);
-  const hits = raycaster.intersectObjects([...registered, spotsGroup, itemsGroup, roomGroup], true);
+  const registered = markersShown() ? [...editorKinds.values()].flatMap(kind => kind.pickables?.() ?? []) : [];
+  const hits = raycaster.intersectObjects([...registered, ...(markersShown() ? [spotsGroup] : []), itemsGroup, roomGroup], true);
   const under = [];
   for (const hit of hits) {
     let o = hit.object;
@@ -2320,6 +2339,7 @@ addEventListener('keydown', e => {
   if (k === 'd') debugOn = !debugOn;
   else if (k === 'm') setEditing(!editing);
   else if (k === 'h' && !editing) touch.setHand(!touch.handOn);
+  else if (k === 'v' && editing) setMarkersHidden(!markersHidden);
   else if (editing && k === 'g') setMode('translate');
   else if (editing && k === 'r') setMode('rotate');
   else if (editing && k === 's') setMode('scale');
@@ -2563,6 +2583,7 @@ const touch = createTouch({
   active: () => active,
   layout: () => layout,
   editing: () => editing,
+  markersShown,
   moodTags: () => (workActions || catalogue).filter(a => a.kind === 'mood').map(a => a.tag),
   pickables: () => [roomGroup, itemsGroup],
   files: () => files,
