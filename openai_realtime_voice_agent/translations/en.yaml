@@ -252,6 +252,13 @@ configuration:
       Optional input_boolean (e.g. input_boolean.nabu_uses_agent). When
       set, the agent above is used only while it is on, checked each time
       the device wakes. Empty = always use the agent when one is set.
+  second_persona_switch:
+    name: "👥 Persona · On/off switch for the second persona"
+    description: >-
+      Optional input_boolean (e.g. input_boolean.lola). While it is off the
+      second persona is out of use: the main persona answers everything,
+      her wake word included, and takes over if she was the one active.
+      Empty = she's always available.
   second_persona_model:
     name: "👥 Persona · Second persona's avatar model file"
     description: >-

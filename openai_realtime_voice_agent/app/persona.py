@@ -57,8 +57,16 @@ class PersonaConfig:
     # persona (see ha_agent.py), and an optional input_boolean that turns it on/off.
     second_agent: str = ""
     second_agent_switch: str = ""
+    # Optional input_boolean that turns the second persona on and off: while it's off
+    # the main persona answers everything, her wake word included (see second_enabled).
+    second_switch: str = ""
     # Her avatar model's file name; empty = the .vrm whose name contains her name.
     second_model_file: str = ""
+
+    @property
+    def second_enabled(self) -> bool:
+        """Configured, and not switched off (second_switch)."""
+        return self.second_available and STATE.second_on
 
     @property
     def second_available(self) -> bool:
@@ -81,12 +89,13 @@ class PersonaConfig:
             speed=_float_env("ELEVENLABS_SPEED"),
             second_agent=_env("SECOND_PERSONA_AGENT"),
             second_agent_switch=_env("SECOND_PERSONA_AGENT_SWITCH"),
+            second_switch=_env("SECOND_PERSONA_SWITCH"),
             second_model_file=_env("SECOND_PERSONA_MODEL"),
         )
 
     def persona_for_option(self, option: str | None) -> str:
         """Map the input_select's option to MAIN/SECOND (unknown → MAIN)."""
-        if option and self.second_available and option.strip().lower() == self.second_name.lower():
+        if option and self.second_enabled and option.strip().lower() == self.second_name.lower():
             return SECOND
         return MAIN
 
@@ -94,7 +103,7 @@ class PersonaConfig:
         """Which persona a wake word calls: the configured one → SECOND, any other → MAIN."""
         def norm(text: str) -> str:
             return "".join(ch for ch in text.lower() if ch.isalnum())
-        if self.second_available and self.second_wake_word and norm(wake_word) == norm(self.second_wake_word):
+        if self.second_enabled and self.second_wake_word and norm(wake_word) == norm(self.second_wake_word):
             return SECOND
         return MAIN
 
@@ -107,6 +116,7 @@ class PersonaState:
 
     def __init__(self) -> None:
         self.active = MAIN
+        self.second_on = True   # the second persona's switch (CONFIG.second_switch), as last read
 
     @property
     def speaks_with_tts(self) -> bool:

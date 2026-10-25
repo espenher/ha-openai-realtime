@@ -17,7 +17,7 @@ from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 from pipecat.transports.websocket.server import WebsocketServerTransport
 from app.mcp_service import HomeAssistantMCPService
 from app.phase_emitter import TURN_LIVENESS, STALE_AUDIO
-from app.persona import CONFIG as PERSONA, SECOND as PERSONA_SECOND
+from app.persona import CONFIG as PERSONA, SECOND as PERSONA_SECOND, STATE as PERSONA_STATE
 from app.avatar import HUB as AVATAR
 from app.avatar_body import avatar_tool_definitions, create_avatar_tool_handlers
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
@@ -956,6 +956,12 @@ class Application:
                                 "trigger": {"platform": "state", "entity_id": PERSONA.entity_id},
                             })
                             await ws.send_json({"id": 3, "type": "subscribe_events", "event_type": "esphome.voice_wake"})
+                            if PERSONA.second_switch:
+                                await ws.send_json({
+                                    "id": 4,
+                                    "type": "subscribe_trigger",
+                                    "trigger": {"platform": "state", "entity_id": PERSONA.second_switch},
+                                })
                             asyncio.create_task(self._apply_initial_persona(token))
                         async for msg in ws:
                             if msg.type != aiohttp.WSMsgType.TEXT:
@@ -968,12 +974,21 @@ class Application:
                                 if wake_word:
                                     asyncio.create_task(self._wake_switch(str(wake_word), token))
                                 continue
+                            if data.get("id") == 4:
+                                variables = (data.get("event") or {}).get("variables") or {}
+                                to_state = (variables.get("trigger") or {}).get("to_state") or {}
+                                asyncio.create_task(self._second_switched(to_state.get("state"), token))
+                                continue
                             if data.get("id") == 2:
                                 variables = (data.get("event") or {}).get("variables") or {}
                                 to_state = (variables.get("trigger") or {}).get("to_state") or {}
                                 switch = getattr(self.websocket_handler, "switch_persona", None)
                                 if to_state.get("state") and switch is not None:
                                     asyncio.create_task(switch(to_state["state"]))
+                                # She's switched off: the main persona answers, and the selector says so.
+                                if (not PERSONA_STATE.second_on and
+                                        (to_state.get("state") or "").strip().lower() == PERSONA.second_name.lower()):
+                                    asyncio.create_task(self._show_persona(PERSONA.main_name, token))
                                 continue
                             message = ((data.get("event") or {}).get("data") or {}).get("message")
                             if message and self.websocket_handler is not None:
@@ -1005,10 +1020,44 @@ class Application:
         except Exception as e:
             logger.warning(f"👥 wake-word switch failed: {e!r}")
 
-    async def _apply_initial_persona(self, token: str) -> None:
-        """At startup, take over whichever persona the input_select shows (silently)."""
+    async def _second_switched(self, state: str | None, token: str) -> None:
+        """The second persona's switch changed. Off: the main persona takes over if she's
+        the one active, and answers everything (her wake word too) until it's on again."""
+        PERSONA_STATE.second_on = state != "off"
+        logger.info(f"👥 {PERSONA.second_name} switched {'on' if PERSONA_STATE.second_on else 'off'}")
+        if PERSONA_STATE.second_on or PERSONA_STATE.active != PERSONA_SECOND:
+            return
+        switch = getattr(self.websocket_handler, "switch_persona", None)
+        if switch is not None:
+            await switch(PERSONA.main_name, greet=False)
+        await self._show_persona(PERSONA.main_name, token)
+
+    async def _show_persona(self, option: str, token: str) -> None:
+        """Set the persona selector in Home Assistant (its own trigger then finds that one active)."""
         try:
             async with aiohttp.ClientSession() as session:
+                await session.post(
+                    "http://supervisor/core/api/services/input_select/select_option",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"entity_id": PERSONA.entity_id, "option": option},
+                )
+        except Exception as e:
+            logger.warning(f"👥 could not set {PERSONA.entity_id}: {e!r}")
+
+    async def _apply_initial_persona(self, token: str) -> None:
+        """At startup, take over whichever persona the input_select shows (silently),
+        unless the second persona's switch is off."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                if PERSONA.second_switch:
+                    async with session.get(
+                        f"http://supervisor/core/api/states/{PERSONA.second_switch}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    ) as resp:
+                        if resp.status == 200:
+                            PERSONA_STATE.second_on = (await resp.json()).get("state") != "off"
+                        else:
+                            logger.info(f"👥 {PERSONA.second_switch} not found; {PERSONA.second_name} stays on")
                 async with session.get(
                     f"http://supervisor/core/api/states/{PERSONA.entity_id}",
                     headers={"Authorization": f"Bearer {token}"},
@@ -1025,6 +1074,9 @@ class Application:
             switch = getattr(self.websocket_handler, "switch_persona", None)
             if switch is not None and option:
                 await switch(option, greet=False)
+            if not PERSONA_STATE.second_on and option and option.strip().lower() == PERSONA.second_name.lower():
+                logger.info(f"👥 {PERSONA.second_name} is switched off; {PERSONA.main_name} answers")
+                await self._show_persona(PERSONA.main_name, token)
         except Exception as e:
             logger.warning(f"👥 could not read the persona selector: {e!r}")
 
