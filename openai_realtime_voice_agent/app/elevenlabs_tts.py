@@ -7,6 +7,12 @@ restarted: nothing reads the new socket, so the reply came out as a 3 s pause
 and then less than a second of speech (2026-10-18 16:22), and every reply
 after that stayed broken until the add-on restarted.
 
+When ElevenLabs closes the socket cleanly instead (after the keepalive sends
+an empty text with no context, which it reads as "end of stream": that
+happens when the user interrupts), the receive loop ends without an error and
+pipecat's `while True` calls it again at once, forever, never yielding: the
+whole add-on froze until the watchdog restarted it (2026-10-26 21:23).
+
 It also reads units out as words: ElevenLabs says "5°C" as "five degs".
 """
 
@@ -16,6 +22,7 @@ import logging
 import re
 
 from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
+from websockets.exceptions import ConnectionClosedOK
 from websockets.protocol import State
 
 logger = logging.getLogger(__name__)
@@ -46,6 +53,13 @@ class SafeElevenLabsTTSService(ElevenLabsTTSService):
         if self._keepalive_task is not None and self._keepalive_task.done():
             self._keepalive_task = None
         await super()._connect()
+
+    async def _receive_messages(self):
+        await super()._receive_messages()
+        # Only gets here when the socket closed cleanly. Raising ends pipecat's
+        # receive task instead of letting it spin; the next wake or reply reconnects.
+        logger.info("🔊 ElevenLabs closed the connection cleanly → reconnecting at the next wake")
+        raise ConnectionClosedOK(None, None)
 
     async def run_tts(self, text: str):
         async for frame in super().run_tts(spoken(text)):
