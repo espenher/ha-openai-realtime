@@ -62,6 +62,13 @@ class PersonaConfig:
     second_switch: str = ""
     # Her avatar model's file name; empty = the .vrm whose name contains her name.
     second_model_file: str = ""
+    # False: the second persona answers everything (see only_second).
+    main_enabled: bool = True
+
+    @property
+    def only_second(self) -> bool:
+        """The main persona is turned off and the second one is there to take over."""
+        return not self.main_enabled and self.second_enabled
 
     @property
     def second_enabled(self) -> bool:
@@ -91,10 +98,13 @@ class PersonaConfig:
             second_agent_switch=_env("SECOND_PERSONA_AGENT_SWITCH"),
             second_switch=_env("SECOND_PERSONA_SWITCH"),
             second_model_file=_env("SECOND_PERSONA_MODEL"),
+            main_enabled=_env("MAIN_PERSONA_ENABLED", "true").lower() != "false",
         )
 
     def persona_for_option(self, option: str | None) -> str:
         """Map the input_select's option to MAIN/SECOND (unknown → MAIN)."""
+        if self.only_second:
+            return SECOND
         if option and self.second_enabled and option.strip().lower() == self.second_name.lower():
             return SECOND
         return MAIN
@@ -103,6 +113,8 @@ class PersonaConfig:
         """Which persona a wake word calls: the configured one → SECOND, any other → MAIN."""
         def norm(text: str) -> str:
             return "".join(ch for ch in text.lower() if ch.isalnum())
+        if self.only_second:
+            return SECOND
         if self.second_enabled and self.second_wake_word and norm(wake_word) == norm(self.second_wake_word):
             return SECOND
         return MAIN

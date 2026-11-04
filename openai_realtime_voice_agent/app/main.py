@@ -1025,9 +1025,13 @@ class Application:
         the one active, and answers everything (her wake word too) until it's on again."""
         PERSONA_STATE.second_on = state != "off"
         logger.info(f"👥 {PERSONA.second_name} switched {'on' if PERSONA_STATE.second_on else 'off'}")
+        switch = getattr(self.websocket_handler, "switch_persona", None)
+        if PERSONA.only_second and switch is not None:     # back on, and the main persona is turned off
+            await switch(PERSONA.second_name, greet=False)
+            await self._show_persona(PERSONA.second_name, token)
+            return
         if PERSONA_STATE.second_on or PERSONA_STATE.active != PERSONA_SECOND:
             return
-        switch = getattr(self.websocket_handler, "switch_persona", None)
         if switch is not None:
             await switch(PERSONA.main_name, greet=False)
         await self._show_persona(PERSONA.main_name, token)
@@ -1077,6 +1081,8 @@ class Application:
             if not PERSONA_STATE.second_on and option and option.strip().lower() == PERSONA.second_name.lower():
                 logger.info(f"👥 {PERSONA.second_name} is switched off; {PERSONA.main_name} answers")
                 await self._show_persona(PERSONA.main_name, token)
+            if PERSONA.only_second:
+                await self._show_persona(PERSONA.second_name, token)
         except Exception as e:
             logger.warning(f"👥 could not read the persona selector: {e!r}")
 

@@ -252,6 +252,12 @@ configuration:
       Optional input_boolean (e.g. input_boolean.nabu_uses_agent). When
       set, the agent above is used only while it is on, checked each time
       the device wakes. Empty = always use the agent when one is set.
+  main_persona_enabled:
+    name: "👥 Persona · Main persona in use"
+    description: >-
+      Off: the second persona answers everything, whichever wake word was
+      heard and whatever the persona selector says. The main persona only
+      comes back if the second persona is switched off or not configured.
   second_persona_switch:
     name: "👥 Persona · On/off switch for the second persona"
     description: >-

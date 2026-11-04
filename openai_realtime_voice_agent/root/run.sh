@@ -75,13 +75,14 @@ export ENABLE_RECORDING
 # --- 👥 Second persona --- (optional values only exported when set; bashio
 # prints "null" for unset optionals)
 MAIN_PERSONA_NAME=$(bashio::config 'main_persona_name')
+MAIN_PERSONA_ENABLED=$(bashio::config 'main_persona_enabled' 'true')
 SECOND_PERSONA_NAME=$(bashio::config 'second_persona_name')
 ELEVENLABS_MODEL=$(bashio::config 'elevenlabs_model')
 PERSONA_ENTITY=$(bashio::config 'persona_entity')
 SECOND_PERSONA_WAKE_WORD=$(bashio::config 'second_persona_wake_word')
 AVATAR_PORT=$(bashio::config 'avatar_port')
 export AVATAR_PORT
-export MAIN_PERSONA_NAME SECOND_PERSONA_NAME ELEVENLABS_MODEL PERSONA_ENTITY SECOND_PERSONA_WAKE_WORD
+export MAIN_PERSONA_NAME MAIN_PERSONA_ENABLED SECOND_PERSONA_NAME ELEVENLABS_MODEL PERSONA_ENTITY SECOND_PERSONA_WAKE_WORD
 if bashio::config.has_value 'second_persona_instructions'; then
     SECOND_PERSONA_INSTRUCTIONS=$(bashio::config 'second_persona_instructions')
     export SECOND_PERSONA_INSTRUCTIONS
