@@ -647,6 +647,12 @@ async function loadCharacter(file, animations) {
     joint.colliderGroups = joint.colliderGroups.filter(g => !g.colliders.some(onArm));
     joint.center = root;
   }
+  // Moving a joint off a center removes that center's cached inverse, even when other
+  // joints still use it (Jarvis's hair and coat share one), and the first update then
+  // throws and stops the whole render loop. Setting it again puts the cache back.
+  for (const joint of vrm.springBoneManager?.joints ?? []) {
+    if (joint.center && !joint.center.userData.inverseCacheProxy) joint.center = joint.center;
+  }
   ch.drape = prepareDrape(vrm);
   ch.mixer.addEventListener('finished', e => {
     if (e.action === ch.actions.get(ch.current)) playFor(ch, phaseAnimation(lastPhase));
