@@ -8,6 +8,8 @@ it controls:
   body (the editor's "how she looks" and "her room" text, plus what she is
   wearing and which colours she has right now) and the moods/gestures she can
   show with [tags].
+- The room's sit spots are listed by their editor names, and [go to <name>]
+  takes her to the one she picks (find_spot matches the name loosely).
 - change_outfit / change_colour are function tools she can use to change her
   own clothes and colours; they edit the saved layout, so the page follows.
 
@@ -16,8 +18,10 @@ Everything is read from the same layout.json the room editor saves.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
+import random
 import re
 import time
 import struct
@@ -167,21 +171,68 @@ def spot_posture(spot: dict) -> str:
     return next((posture for pattern, posture in POSTURES if pattern.search(animation)), "sitting")
 
 
-def describe_spot(spot: dict | None, layout: dict) -> str:
-    """What she's doing at a sit spot: its "Doing" text from the editor, or a guess from
-    its animation (lying, kneeling... and reading, with a reading animation or a book
-    set out at that spot)."""
-    if not spot:
-        return "You're sitting down."
-    doing = (spot.get("doing") or "").strip().rstrip(".")
+def spot_name(spot: dict) -> str:
+    return (spot.get("name") or "").strip()
+
+
+def spot_doing(spot: dict, layout: dict) -> str:
+    """What she does at a sit spot, as a phrase ("lying on the sofa, reading a book"): its
+    "Doing" text from the editor, or a guess from its animation (lying, kneeling... and
+    reading, with a reading animation or a book set out at that spot)."""
+    doing = re.sub(r"(?i)^you(?:'re| are)\s+", "", (spot.get("doing") or "").strip().rstrip("."))
     if doing:
-        return doing[0].upper() + doing[1:] + "." if re.match(r"(?i)you(?:'re| are)\b", doing) else f"You're {doing}."
+        return doing[0].lower() + doing[1:]
     animation = spot.get("animation") or ""
     posture = POSTURE_WORDS[spot_posture(spot)]
     book = any(item.get("withSpot") == spot.get("id") and "book" in (item.get("file") or "").lower()
                for item in layout.get("items") or [])
     reading = ", reading a book" if book or re.search(r"read", animation, re.I) else ""
-    return f"You're {posture}{reading}."
+    return f"{posture}{reading}"
+
+
+def describe_spot(spot: dict | None, layout: dict) -> str:
+    """What she's doing at a sit spot, and the place's name if it has one."""
+    if not spot:
+        return "You're sitting down."
+    at = f" (at the place called \"{spot_name(spot)}\")" if spot_name(spot) else ""
+    return f"You're {spot_doing(spot, layout)}{at}."
+
+
+def _key(text: str) -> str:
+    """A name to compare: lower case, letters and digits only, no "the"/"your"/"my" in front."""
+    words = re.sub(r"[^a-z0-9 ]", " ", text.lower()).split()
+    while words and words[0] in ("the", "your", "my"):
+        words = words[1:]
+    return " ".join(words)
+
+
+def find_spot(name: str, layout: dict) -> dict | None:
+    """The named sit spot she means: the same name, else one whose name contains her words
+    ("sofa" for "sofa armrest"; one of them at random if several do), else the closest
+    spelling. None if nothing fits."""
+    named = {_key(spot_name(s)): s for s in layout.get("spots") or [] if s.get("type") == "sit" and spot_name(s)}
+    wanted = _key(name)
+    if not wanted:
+        return None
+    if wanted in named:
+        return named[wanted]
+    containing = [k for k in named if f" {wanted} " in f" {k} "]
+    if containing:
+        return named[random.choice(containing)]
+    close = difflib.get_close_matches(wanted, list(named), n=1, cutoff=0.6)
+    return named[close[0]] if close else None
+
+
+async def go_to_spot(name: str) -> str:
+    """Send her to the sit spot she named; if there's none by that name, somewhere to sit."""
+    spot = find_spot(name, load_layout())
+    if spot is None:
+        logger.info(f"🧍 no place called {name!r} → somewhere to sit")
+        HUB.send({"type": "tag", "value": "sit down"})
+        return f"no place called {name}"
+    logger.info(f"🧍 going to {spot_name(spot)!r}")
+    HUB.send({"type": "tag", "value": f"go to #{spot['id']}"})
+    return spot_name(spot)
 
 
 def describe_activity(layout: dict | None = None) -> str:
@@ -225,10 +276,17 @@ def describe_touch() -> str:
 # [put on jacket], [hair pink], [jacket burgundy], [eyes amber].
 TAG_CLOTHES = ("jacket", "tie", "socks", "sneakers", "panties", "top", "shirt", "skirt")
 OUTFIT_TAG = re.compile(r"^(take off|remove|put on|wear)\s+(?:your\s+|my\s+)?(.+)$")
+# [go to sofa] (the one in her instructions), and the ways she might put it herself.
+GO_TO_TAG = re.compile(r"^(?:go to|go sit (?:at|on|in)|sit (?:at|on|in)|lie (?:on|in))\s+(.+)$")
 
 
 def body_tag_action(value: str) -> Callable[[], Awaitable[str]] | None:
-    """If a [tag] changes her outfit or a colour, the change to make; None for moods and gestures."""
+    """If a [tag] changes her outfit or a colour, or names a place to go, what to do;
+    None for moods and gestures."""
+    m = GO_TO_TAG.match(value)
+    if m:
+        place = m.group(1)
+        return lambda: go_to_spot(place)
     m = OUTFIT_TAG.match(value)
     if m and m.group(2) in TAG_CLOTHES:
         item, wear = m.group(2), m.group(1) in ("put on", "wear")
@@ -305,9 +363,16 @@ def avatar_instructions(for_agent: bool = False) -> str:
     # The avatar page walks her to the room's sit spot and back (and does so by itself after a quiet spell).
     sit_spots = [spot for spot in layout.get("spots") or [] if spot.get("type") == "sit"]
     if sit_spots:
-        lie = "; [lie down] go and lie down" if any(spot_posture(spot) == "lying" for spot in sit_spots) else ""
-        parts.append(f"\n\nMoving around: [sit down] go and sit down{lie}; [stand up] get up and come back to "
-                     "your spot. You also go and sit by yourself when nobody has talked to you for a while.")
+        lie = "; [lie down] go and lie down somewhere" if any(spot_posture(spot) == "lying" for spot in sit_spots) else ""
+        places = [f"- {spot_name(spot)}: {spot_doing(spot, layout)}" for spot in sit_spots if spot_name(spot)]
+        if places:
+            parts.append("\n\nPlaces in your room, and what you do there:\n" + "\n".join(places)
+                         + "\nTo go to one, use [go to <place>] with its name as written here, e.g. "
+                         f"[go to {spot_name(next(s for s in sit_spots if spot_name(s)))}]. Pick the one that "
+                         "fits what you're asked or what you feel like.")
+        parts.append(f"\n\nMoving around: [sit down] sit somewhere that suits you{lie}; [stand up] get up and "
+                     "come back to your spot. You also go and sit by yourself when nobody has talked to you "
+                     "for a while.")
     # The page loops her dance (the one picked in the editor, else one with "dance" in its name) until told to stop.
     if _can_dance(layout):
         parts.append("\n\nDancing: [start dancing] you dance, and keep dancing while you talk, until [stop dancing]. "

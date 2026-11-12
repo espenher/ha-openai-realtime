@@ -1320,6 +1320,14 @@ function activityTag(ch, tag) {
   if (SIT_WORDS.has(tag)) { goSit(ch, pickSitSpot(ch, 'asked', 'sitting'), false); return true; }
   if (LIE_WORDS.has(tag)) { goSit(ch, pickSitSpot(ch, 'asked', 'lying'), false); return true; }
   if (STAND_WORDS.has(tag)) { goHome(ch); return true; }
+  // [go to <place>]: the add-on finds the spot she named (avatar_body.find_spot) and
+  // sends its id as "go to #<id>".
+  const goTo = /^go to #(\w+)$/.exec(tag);
+  if (goTo) {
+    const spot = spotOf(goTo[1]);
+    if (spot?.type === 'sit') goSit(ch, spot, false);
+    return true;
+  }
   return false;
 }
 function sitAnimation(ch, spot) {
