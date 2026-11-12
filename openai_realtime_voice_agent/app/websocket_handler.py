@@ -957,7 +957,9 @@ class WebSocketHandler:
 
         self.announce = _announce
 
-        AVATAR.send({"type": "persona", "value": PERSONA.main_name})
+        # With the main persona turned off, pages show her from the start instead of
+        # his body for the half minute until the startup switch to her.
+        AVATAR.send({"type": "persona", "value": PERSONA.second_name if PERSONA.only_second else PERSONA.main_name})
         main_instructions = openai_service._session_properties.instructions
         switch_lock = asyncio.Lock()
 
