@@ -59,6 +59,11 @@ STATIC_DIR = pathlib.Path(__file__).parent / "static"
 UPLOAD_DIR = pathlib.Path("/media/avatar")
 OLD_UPLOAD_DIR = pathlib.Path("/data/avatar")
 MEDIA_DIRS = (UPLOAD_DIR, pathlib.Path("/media"))
+# What she sees through Espen's phone camera: script.look_at_camera saves three
+# snapshots here, and the room's screen shows them (static/screen.js). A frame can
+# only be fetched for LOOK_SERVE_S after it was taken, never later.
+LOOK_FILES = tuple(pathlib.Path(f"/media/look_{n}.jpg") for n in (1, 2, 3))
+LOOK_SERVE_S = 30
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_SUFFIXES = {".vrm", ".fbx", ".vrma", ".glb", ".png", ".jpg", ".jpeg"}
 ACTIVITIES = ("standing", "sitting", "dancing")
@@ -121,6 +126,13 @@ def save_layout(layout: dict) -> None:
     tmp.replace(UPLOAD_DIR / "layout.json")
 
 
+def _mtime(path: pathlib.Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
 def avatar_actions() -> list[dict]:
     """The avatar's moods and gestures: the room editor's saved list, or the defaults."""
     actions = load_layout().get("actions")
@@ -171,11 +183,13 @@ class AvatarHub:
         app.router.add_put("/memory", self._put_memory)
         app.router.add_get("/chatlog", self._get_chatlog)
         app.router.add_get("/chat", self._chat_page)
+        app.router.add_get("/look/{n}", self._look)
         app.router.add_get("/ws", self._ws)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", port).start()
         logger.info(f"🧍 Avatar page on port {port} (models from {self._media_dir()})")
+        asyncio.create_task(self._watch_looks())
 
     @staticmethod
     def _move_old_uploads() -> None:
@@ -313,6 +327,36 @@ class AvatarHub:
 
     async def _chat_page(self, request: web.Request) -> web.FileResponse:
         return web.FileResponse(STATIC_DIR / "chat.html", headers={"Cache-Control": "no-cache"})
+
+    # ---------- the camera she looks through ----------
+    async def _watch_looks(self) -> None:
+        """Tell the pages each time a new camera frame is saved, so the screen shows it.
+        A frame counts once its file has stopped changing (not while it's being written)."""
+        seen = {path: _mtime(path) for path in LOOK_FILES}
+        settling: dict[pathlib.Path, float] = {}
+        while True:
+            await asyncio.sleep(0.25)
+            for n, path in enumerate(LOOK_FILES, 1):
+                stamp = _mtime(path)
+                if not stamp or stamp == seen[path]:
+                    continue
+                if settling.get(path) != stamp:   # changed since the last look: let it finish
+                    settling[path] = stamp
+                    continue
+                seen[path] = stamp
+                if n == 1:
+                    logger.info("👁 she's looking through the camera")
+                self.send({"type": "look", "frame": n, "v": int(stamp * 1000)})
+
+    async def _look(self, request: web.Request) -> web.FileResponse:
+        n = request.match_info["n"]
+        if n not in ("1", "2", "3"):
+            raise web.HTTPNotFound()
+        path = LOOK_FILES[int(n) - 1]
+        stamp = _mtime(path)
+        if not stamp or time.time() - stamp > LOOK_SERVE_S:
+            raise web.HTTPNotFound()
+        return web.FileResponse(path, headers={"Cache-Control": "no-store"})
 
     async def _ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=30)

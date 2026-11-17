@@ -164,6 +164,7 @@
 
   <h2>Add</h2>
   <div class="row"><select id="itemFile"></select><button id="addItem">Add furniture</button></div>
+  <div class="row" title="A monitor that shows what she sees when she looks through your phone camera"><button id="addScreen">Add screen</button></div>
   <div class="row"><select id="newSpotType">
       <option value="sit" selected>sit</option><option value="home">home</option><option value="stand">stand</option>
       <option value="sleep">sleep</option><option value="dance">dance</option>
@@ -208,6 +209,7 @@ import { VRMAnimationLoaderPlugin, VRMLookAtQuaternionProxy, createVRMAnimationC
 import { createTouch } from './static/touch.js';
 import { createShots } from './static/shots.js';
 import { createMemoryEditor } from './static/memory.js';
+import { createScreen } from './static/screen.js';
 
 const params = new URLSearchParams(location.search);
 const MOUTH_DELAY = Number(params.get('delay') ?? 450) / 1000;
@@ -2049,14 +2051,14 @@ function updateHeadTurn(ch, dt) {
   const head = ch.vrm.humanoid.getNormalizedBoneNode('head');
   fromAnimation(head);
   if (!head || !ch.headForward) return;
-  const goal = lastPhase === 'replying' || lastPhase === 'listening' ? 0.85
+  const goal = screenGaze || lastPhase === 'replying' || lastPhase === 'listening' ? 0.85
     : lastPhase === 'thinking' || ch.away === 'sit' ? 0 : 0.3;
   ch.headTurn = (ch.headTurn ?? 0) + (goal - (ch.headTurn ?? 0)) * Math.min(1, dt * 3);
   if (ch.headTurn < 0.01) return;
   head.updateWorldMatrix(true, false);
   head.getWorldQuaternion(_hq);
   _hf.copy(ch.headForward).applyQuaternion(_hq);
-  _hw.copy(camera.position).sub(head.getWorldPosition(_hp)).normalize();
+  _hw.copy(screenGaze ?? camera.position).sub(head.getWorldPosition(_hp)).normalize();
   _dq.setFromUnitVectors(_hf, _hw);
   const angle = 2 * Math.acos(Math.min(1, Math.abs(_dq.w)));
   _nq.identity().slerp(_dq, Math.min(1, HEAD_TURN_MAX / Math.max(angle, 1e-6)) * ch.headTurn);
@@ -2071,6 +2073,7 @@ async function loadLayout() {
   await loadRoom();
   await loadItems();
   loadSpots();
+  monitor.rebuild();
   for (const ch of characters.values()) { applyWardrobe(ch); applyAppearance(ch); }
   placeCharacter();
 }
@@ -2522,6 +2525,7 @@ const gazeOffset = new THREE.Vector3(), gazeGlance = new THREE.Vector3(), THINKI
 const gazePoint = new THREE.Vector3(), gazeWant = new THREE.Vector3();
 let nextGlance = 0, gazeStarted = false;
 let touchGaze = null;   // the hand, while it's touching her (touch.js)
+let screenGaze = null;  // the screen, while it shows what she sees through the camera (screen.js)
 function updateGaze(dt, now) {
   const dist = active ? camera.position.distanceTo(active.root.position) : 2;
   if (now > nextGlance) {
@@ -2536,6 +2540,7 @@ function updateGaze(dt, now) {
     else gazeWant.set(0, 0.35, 1.2).multiplyScalar(active.root.scale.y)
       .applyAxisAngle(new THREE.Vector3(0, 1, 0), active.root.rotation.y).add(active.root.position);
   }
+  if (screenGaze) gazeWant.copy(screenGaze);
   if (touchGaze) gazeWant.copy(touchGaze);
   if (!gazeStarted) { gazePoint.copy(gazeWant); gazeStarted = true; }
   gazePoint.lerp(gazeWant, Math.min(1, dt * 6));
@@ -2581,6 +2586,7 @@ function onMessage(msg) {
       break;
     }
     case 'interrupt': envelope.length = 0; break;
+    case 'look': monitor.look(msg); break;
     case 'layout':
       if (!editing) loadLayout();
       else mergeBodyState().catch(e => console.warn('layout', e));
@@ -2621,6 +2627,21 @@ const touch = createTouch({
   fromAnimation, layered,
 });
 $('handToggle').onclick = () => touch.setHand(!touch.handOn);
+
+// ---------- screen (screen.js): the monitor showing what she sees through the camera ----------
+const monitor = createScreen({
+  scene,
+  layout: () => layout,
+  registerEditorKind: (kind, handlers) => editorKinds.set(kind, handlers),
+  selectInEditor: obj => { if (editing) select(obj); },
+  watch: point => { screenGaze = point; },
+});
+// A new screen where the editor camera looks (at least a metre up), facing the camera.
+$('addScreen').onclick = () => {
+  const at = orbit.target.clone();
+  at.y = Math.max(at.y, 1);
+  monitor.add(at, Math.atan2(camera.position.x - at.x, camera.position.z - at.z));
+};
 
 let nextBlink = 2, blinkT = -1;
 renderer.setAnimationLoop(() => {
@@ -2663,6 +2684,7 @@ renderer.setAnimationLoop(() => {
     debugEl.textContent = `persona  ${activePersona}\nphase    ${lastPhase}\nanim     ${active?.current}\nmood     ${active?.mood || '-'}\nmouth    ${mouth.toFixed(2)}\nroom     ${layout.room?.file || '-'}\nspots    ${(layout.spots || []).length}`;
   } else debugEl.style.display = 'none';
   touch.update(dt);
+  monitor.update(dt, now);
   renderer.render(scene, camera);
 });
 
