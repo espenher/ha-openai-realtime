@@ -7,8 +7,9 @@ after a few minutes of quiet and the next one starts fresh. What carries over:
   with [forget: ...]); the tags are taken out before anything is spoken. Only she
   adds notes: the room editor can edit or delete them, not add.
 - Diary. When a conversation ends, she's asked (in that same conversation, so with
-  all of it in mind and in her own voice) for a short diary entry, and for any
-  notes worth keeping. That reply is never spoken.
+  all of it in mind and in her own voice) for a one- or two-sentence diary entry,
+  and for any notes worth keeping; she answers "nothing" to skip a conversation
+  that wasn't worth writing about. That reply is never spoken.
 - Time. Each new conversation starts with the date and time, and how long it's
   been since she last talked with Espen, with a rule to only bring the gap up
   when it's notable.
@@ -41,7 +42,7 @@ MEMORY_FILE = MEMORY_DIR / "memory.json"
 CHATLOG_FILE = MEMORY_DIR / "chatlog.jsonl"
 
 NOTES_SHOWN = 60          # newest notes in her context
-DIARY_DAYS = 7            # diary entries from the last this many days in her context
+DIARY_SHOWN = 15          # newest diary entries in her context (however far back they go)
 CHATLOG_DAYS = 30         # chat log kept this long
 NOTES_KEPT = 1000         # oldest notes beyond this are dropped from the file
 SAME_NOTE = 0.85          # this similar to a note she has → not saved again
@@ -64,11 +65,14 @@ GAP_RULE = (
     "usual, or when it connects to something you remember. Usually, just carry on as normal."
 )
 DIARY_REQUEST = (
-    "(Not said by Espen: this conversation is over now. Write a short diary entry about it, two or "
-    "three sentences in your own voice, as you'd write it for yourself. Add [remember: ...] for anything "
-    "worth keeping that you haven't noted yet. Don't use any tools or take any actions; this is never "
-    "spoken or shown to him.)"
+    "(Not said by Espen: this conversation is over now. Write a diary entry about it: one or two "
+    "sentences in your own voice, about what mattered, as you'd write it for yourself. If nothing "
+    "happened that's worth writing down, answer only: nothing. Either way, add [remember: ...] for "
+    "anything worth keeping that you haven't noted yet. Don't use any tools or take any actions; this "
+    "is never spoken or shown to him.)"
 )
+# Her answer when a conversation wasn't worth a diary entry.
+NOTHING = re.compile(r"^\W*nothing\W*$", re.I)
 
 _zone = None   # Home Assistant's time zone, once ha_agent has looked it up
 
@@ -203,9 +207,11 @@ def touch_talked() -> None:
 
 
 def add_diary(reply: str) -> bool:
-    """Her answer to the diary request: notes from its tags, the rest as the entry."""
+    """Her answer to the diary request: notes from its tags, the rest as the entry
+    (none if she said there was nothing worth writing down)."""
     entry = " ".join(ANY_TAG.sub("", take_memory_tags(reply)).split())
-    if not entry:
+    if not entry or NOTHING.match(entry):
+        logger.info("🧠 no diary entry this time")
         return False
     data = _load()
     data["diary"].append({"id": _new_id(), "at": _stamp(), "text": entry})
@@ -225,7 +231,7 @@ def context() -> str:
     if notes:
         parts.append("# What you remember\n" + "\n".join(
             f"- ({_short_date(note.get('made'))}) {note.get('text', '')}" for note in notes))
-    recent = [d for d in data["diary"] if (moment := _parse(d.get("at"))) and at - moment < timedelta(days=DIARY_DAYS)]
+    recent = [d for d in data["diary"][-DIARY_SHOWN:] if _parse(d.get("at"))]
     if recent:
         parts.append("# Your diary, lately\n" + "\n".join(
             f"- {when(_parse(d['at']))}: {d.get('text', '')}" for d in recent))
