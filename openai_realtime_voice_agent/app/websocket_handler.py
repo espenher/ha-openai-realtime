@@ -898,7 +898,8 @@ class WebSocketHandler:
                 await _sync_agent_mode()   # its switch may have changed since the last wake
             if AGENT_MODE.active:
                 try:
-                    reply = await ha_agent.ask(agent_text, avatar_instructions(for_agent=True), describe_activity())
+                    reply = await ha_agent.ask(agent_text, avatar_instructions(for_agent=True), describe_activity(),
+                                               kind="unprompted")
                 except Exception as e:
                     logger.warning(f"🧠 the agent couldn't speak up: {e!r}")
                     return "agent failed"

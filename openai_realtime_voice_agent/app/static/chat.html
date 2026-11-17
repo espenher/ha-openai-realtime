@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat log</title>
+<!--
+  Every turn between Espen and her through the Home Assistant agent, as it was sent
+  to her (what speech-to-text heard) and as she answered (tags shown as chips).
+  "Show hidden context" also shows what the add-on put in front of a turn (her body
+  note, memory and time at the start of a conversation, "right now" lines) and the
+  diary request when a conversation ended. Read from GET /chatlog (memory.py); kept
+  30 days.
+-->
+<style>
+  :root { --bg: #111317; --panel: #1a1d23; --line: #343945; --text: #e8e8ea; --muted: #8f96a3;
+          --accent: #6aa8ff; --you: #24344d; --her: #2b2f38; --note: #3a3322; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px system-ui, sans-serif; }
+  header { position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--line);
+           padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  header label { color: var(--muted); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  button { background: var(--her); color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+           padding: 5px 10px; font: inherit; font-size: 13px; cursor: pointer; }
+  main { max-width: 760px; margin: 0 auto; padding: 8px 16px 40px; }
+  .conv { border: 1px solid var(--line); border-radius: 10px; margin: 14px 0; padding: 10px 12px; background: var(--panel); }
+  .conv > h2 { font-size: 12px; color: var(--muted); font-weight: 600; margin: 0 0 8px; text-transform: uppercase;
+               letter-spacing: .05em; }
+  .turn { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; }
+  .who { font-size: 11px; color: var(--muted); }
+  .bubble { padding: 8px 11px; border-radius: 12px; max-width: 85%; white-space: pre-wrap; word-wrap: break-word;
+            line-height: 1.4; }
+  .you { align-self: flex-end; text-align: right; }
+  .you .bubble { background: var(--you); align-self: flex-end; text-align: left; }
+  .her .bubble { background: var(--her); align-self: flex-start; }
+  .told .bubble, .diary .bubble { background: var(--note); align-self: flex-start; font-style: italic; }
+  .tag { display: inline-block; font-size: 11px; font-style: normal; color: var(--accent); border: 1px solid var(--accent);
+         border-radius: 10px; padding: 0 6px; margin: 0 2px; vertical-align: 1px; }
+  details.hidden { align-self: stretch; font-size: 12px; color: var(--muted); }
+  details.hidden pre { white-space: pre-wrap; word-wrap: break-word; background: #0c0e12; border: 1px solid var(--line);
+                       border-radius: 8px; padding: 8px; max-height: 320px; overflow: auto; }
+  body:not(.show-hidden) .hidden-only { display: none; }
+  .empty { color: var(--muted); text-align: center; margin-top: 40px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Chat log</h1>
+  <label><input type="checkbox" id="showHidden"> Show hidden context</label>
+  <button id="refresh">Refresh</button>
+</header>
+<main id="log"><p class="empty">Loading…</p></main>
+<script>
+const $ = id => document.getElementById(id);
+function el(tag, props = {}, ...children) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...children);
+  return e;
+}
+const time = stamp => new Date(stamp).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+const day = stamp => new Date(stamp).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+
+// Her reply with each [tag] as a chip (text only: nothing in it is treated as HTML).
+function withChips(text) {
+  const out = el('div', { className: 'bubble' });
+  let at = 0;
+  for (const m of text.matchAll(/\[([^\]\n]{1,300})\]/g)) {
+    out.append(text.slice(at, m.index), el('span', { className: 'tag', textContent: m[1] }));
+    at = m.index + m[0].length;
+  }
+  out.append(text.slice(at));
+  return out;
+}
+
+function hiddenBlock(text, label) {
+  return el('details', { className: 'hidden hidden-only' }, el('summary', { textContent: label }), el('pre', { textContent: text }));
+}
+
+function turnView(t) {
+  const box = el('div');
+  if (t.kind === 'diary') {
+    box.className = 'hidden-only';
+    box.append(el('div', { className: 'turn told' }, el('span', { className: 'who', textContent: `${time(t.at)} · diary request` }),
+                  hiddenBlock(t.hidden, 'What she was asked')),
+               el('div', { className: 'turn diary' }, el('span', { className: 'who', textContent: 'Her diary reply' }), withChips(t.reply || '')));
+    return box;
+  }
+  const mine = t.kind === 'speech';
+  const asked = el('div', { className: `turn ${mine ? 'you' : 'told'}` },
+    el('span', { className: 'who', textContent: `${time(t.at)} · ${mine ? 'you (as heard)' : 'told to speak up'}` }));
+  if (t.hidden) asked.append(hiddenBlock(t.hidden, 'Hidden context in front of this'));
+  asked.append(el('div', { className: 'bubble', textContent: t.heard || '' }));
+  box.append(asked, el('div', { className: 'turn her' }, el('span', { className: 'who', textContent: 'her' }), withChips(t.reply || '')));
+  return box;
+}
+
+async function load() {
+  let turns;
+  try {
+    turns = await (await fetch('/chatlog', { cache: 'no-store' })).json();
+  } catch (e) {
+    $('log').replaceChildren(el('p', { className: 'empty', textContent: `Couldn't load the chat log: ${e}` }));
+    return;
+  }
+  // Conversations, newest first; turns in order within each.
+  const convs = [];
+  for (const t of turns) {
+    const last = convs[convs.length - 1];
+    if (last && last.id === t.conversation) last.turns.push(t);
+    else convs.push({ id: t.conversation, turns: [t] });
+  }
+  if (!convs.length) {
+    $('log').replaceChildren(el('p', { className: 'empty', textContent: 'No conversations yet.' }));
+    return;
+  }
+  $('log').replaceChildren(...convs.reverse().map(c => {
+    const first = c.turns[0].at, end = c.turns[c.turns.length - 1].at;
+    return el('section', { className: 'conv' }, el('h2', { textContent: `${day(first)} · ${time(first)}–${time(end)}` }),
+              ...c.turns.map(turnView));
+  }));
+}
+
+$('showHidden').onchange = e => document.body.classList.toggle('show-hidden', e.target.checked);
+$('refresh').onclick = load;
+load();
+</script>
+</body>
+</html>

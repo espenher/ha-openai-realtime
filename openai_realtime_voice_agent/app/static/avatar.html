@@ -145,6 +145,9 @@
     <div class="row" style="margin-top:6px"><button id="addMood">+ Mood</button><button id="addGesture">+ Gesture</button>
       <button id="resetActions">Reset to defaults</button></div>
   </details>
+  <h2>Memory</h2>
+  <p>What she remembers, and her diary. Only she adds to them; you can fix or delete. Saved right away.</p>
+  <div id="memoryEditor"></div>
   <h2>Touch</h2>
   <p>Where she can be touched with the 🖐 hand, and what each kind of touch means to her there. Each zone is a bubble
      riding on one of her bones.</p>
@@ -204,6 +207,7 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import { VRMAnimationLoaderPlugin, VRMLookAtQuaternionProxy, createVRMAnimationClip } from '@pixiv/three-vrm-animation';
 import { createTouch } from './static/touch.js';
 import { createShots } from './static/shots.js';
+import { createMemoryEditor } from './static/memory.js';
 
 const params = new URLSearchParams(location.search);
 const MOUTH_DELAY = Number(params.get('delay') ?? 450) / 1000;
@@ -2131,6 +2135,7 @@ function setEditing(on) {
     [$('charIdleMin').value, $('charIdleMax').value] = idleChange();
     touch.editorOpened();
     shots.editorChanged();
+    memoryEditor.load();
   } else {
     select(null);
     applyViewCamera();
@@ -2591,6 +2596,9 @@ function connect() {
 
 // ---------- loop ----------
 const clock = new THREE.Clock();
+// ---------- memory (memory.js): the editor's Memory section ----------
+const memoryEditor = createMemoryEditor($('memoryEditor'));
+
 // ---------- touch (touch.js): the 🖐 hand and the zones she feels it in ----------
 const touch = createTouch({
   scene, camera, canvas: renderer.domElement,

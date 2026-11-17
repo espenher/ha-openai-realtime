@@ -50,6 +50,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
+from app import memory
 from app.persona import CONFIG as PERSONA
 
 logger = logging.getLogger(__name__)
@@ -100,8 +101,9 @@ DEFAULT_ACTIONS = [
     {"tag": "pose", "kind": "gesture", "animation": "Model pose", "note": "posing, showing off"},
     {"tag": "show outfit", "kind": "gesture", "animation": "Show full body", "note": "showing off your outfit"},
 ]
-TAG = re.compile(r"\[([A-Za-z][A-Za-z _-]{0,23})\]\s*")
-UNFINISHED_TAG = re.compile(r"\[[A-Za-z _-]{0,24}$")
+# Room for [go to <a spot's name>] (spot names can be long and hold digits).
+TAG = re.compile(r"\[([A-Za-z][A-Za-z0-9 _'-]{0,59})\]\s*")
+UNFINISHED_TAG = re.compile(r"\[[A-Za-z0-9 _'-]{0,60}$")
 
 
 def load_layout() -> dict:
@@ -165,6 +167,10 @@ class AvatarHub:
         app.router.add_get("/layout", self._get_layout)
         app.router.add_get("/actions", self._get_actions)
         app.router.add_put("/layout", self._put_layout)
+        app.router.add_get("/memory", self._get_memory)
+        app.router.add_put("/memory", self._put_memory)
+        app.router.add_get("/chatlog", self._get_chatlog)
+        app.router.add_get("/chat", self._chat_page)
         app.router.add_get("/ws", self._ws)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
@@ -287,6 +293,27 @@ class AvatarHub:
             await self.on_layout_saved()
         return web.json_response({"saved": True})
 
+    # Her memory (memory.py): the editor's Memory section reads it and saves edits and
+    # deletions; the chat log page shows every turn as it was sent to her.
+    async def _get_memory(self, request: web.Request) -> web.Response:
+        return web.json_response(memory.for_editor(), headers={"Cache-Control": "no-cache"})
+
+    async def _put_memory(self, request: web.Request) -> web.Response:
+        try:
+            sent = await request.json()
+        except Exception:
+            raise web.HTTPBadRequest(text="Memory must be JSON.")
+        if not isinstance(sent, dict):
+            raise web.HTTPBadRequest(text="Memory must be a JSON object.")
+        logger.info("🧠 memory edited in the room editor")
+        return web.json_response(memory.update_from_editor(sent))
+
+    async def _get_chatlog(self, request: web.Request) -> web.Response:
+        return web.json_response(memory.chatlog(), headers={"Cache-Control": "no-cache"})
+
+    async def _chat_page(self, request: web.Request) -> web.FileResponse:
+        return web.FileResponse(STATIC_DIR / "chat.html", headers={"Cache-Control": "no-cache"})
+
     async def _ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
@@ -399,9 +426,13 @@ class AvatarTags(FrameProcessor):
             return
         if isinstance(frame, LLMTextFrame):
             text, self._held = self._held + frame.text, ""
-            unfinished = UNFINISHED_TAG.search(text)
+            unfinished = memory.UNFINISHED_MEMORY_TAG.search(text) or UNFINISHED_TAG.search(text)
             if unfinished:
                 text, self._held = text[: unfinished.start()], text[unfinished.start():]
+            # [remember: ...] / [forget: ...] go to her memory (logged without the words).
+            if memory.MEMORY_TAG.search(text):
+                self._tagged = True
+                text = memory.take_memory_tags(text)
             for tag in TAG.finditer(text):
                 self._tagged = True
                 value = tag.group(1).strip().lower()
