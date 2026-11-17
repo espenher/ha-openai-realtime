@@ -2139,6 +2139,10 @@ function setEditing(on) {
   } else {
     select(null);
     applyViewCamera();
+    // Time in the editor isn't her quiet time: the idle rules (updateActivity) are
+    // paused while editing, and without this Done set them off at once if the editor
+    // was open longer than "Idle after", so she always walked off.
+    quietSince = performance.now() / 1000;
   }
 }
 $('editToggle').onclick = () => setEditing(true);
