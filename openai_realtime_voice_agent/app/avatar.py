@@ -51,6 +51,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from app import memory
+from app.mic_test import MIC_TEST
 from app.persona import CONFIG as PERSONA
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,7 @@ class AvatarHub:
         app.router.add_get("/chatlog", self._get_chatlog)
         app.router.add_get("/chat", self._chat_page)
         app.router.add_get("/look/{n}", self._look)
+        app.router.add_get("/mictest", MIC_TEST.handle)
         app.router.add_get("/ws", self._ws)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()

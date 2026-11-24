@@ -26,6 +26,7 @@ from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGa
 from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap
 from app.avatar_body import TOUCH_NOTE_S, avatar_instructions, body_tag_action, describe_activity
 from app.ha_agent import MODE as AGENT_MODE, AgentReplies, HAConversationAgent
+from app.mic_test import MIC_TEST
 from app.transcript_logger import TranscriptLogger
 
 logger = logging.getLogger(__name__)
@@ -888,6 +889,8 @@ class WebSocketHandler:
             """
             if not self._websockets:
                 return "no device connected"
+            if MIC_TEST.recording:
+                return "busy"
             for _ in range(wait_s):
                 if phase_emitter._current in (None, "idle"):
                     break
@@ -957,6 +960,8 @@ class WebSocketHandler:
             return result
 
         self.announce = _announce
+        MIC_TEST.connect(self._send_phase,
+                         lambda: bool(self._websockets) and phase_emitter._current in (None, "idle"))
 
         # With the main persona turned off, pages show her from the start instead of
         # his body for the half minute until the startup switch to her.
@@ -1251,6 +1256,11 @@ class WebSocketHandler:
 
     async def broadcast_phase(self, value: str) -> None:
         """Send a va_client phase message to every connected device."""
+        if MIC_TEST.recording:   # the mic test holds the device's phase itself
+            return
+        await self._send_phase(value)
+
+    async def _send_phase(self, value: str) -> None:
         # TEMP instrumentation: log the broadcast + how many device sockets we
         # think are connected (was debug).
         logger.info(f"➡️ broadcast phase '{value}' to {len(self._websockets)} device(s)")

@@ -6,6 +6,8 @@ import os
 from pipecat.frames.frames import InputAudioRawFrame, OutputAudioRawFrame, Frame
 from pipecat.serializers.base_serializer import FrameSerializer, FrameSerializerType
 
+from app.mic_test import MIC_TEST
+
 logger = logging.getLogger(__name__)
 
 
@@ -116,7 +118,7 @@ class RawAudioSerializer(FrameSerializer):
                 return None
             if isinstance(data, dict) and data.get("type") == "interrupt":
                 logger.info("🛑 device interrupt received")
-                if self._on_interrupt is not None:
+                if not MIC_TEST.on_interrupt() and self._on_interrupt is not None:
                     try:
                         await self._on_interrupt()
                     except Exception as e:
@@ -147,7 +149,7 @@ class RawAudioSerializer(FrameSerializer):
                 # actually speaks, any server-VAD end-of-turn is a stale segment
                 # from the previous turn closing late (→ garbage response).
                 logger.info("👋 device wake received")
-                if self._on_wake is not None:
+                if not MIC_TEST.on_wake() and self._on_wake is not None:
                     try:
                         await self._on_wake()
                     except Exception as e:
@@ -163,6 +165,9 @@ class RawAudioSerializer(FrameSerializer):
         if len(message) % 2 != 0:
             logger.warning(f"⚠️ Received audio with odd byte count: {len(message)} bytes, skipping")
             return None
+
+        if MIC_TEST.on_audio(message):
+            return None   # for the PC, not for OpenAI
 
         self._mic_bytes += len(message)
         samples = array("h")
