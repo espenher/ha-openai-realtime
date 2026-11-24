@@ -315,6 +315,16 @@ configuration:
       and Mixamo .fbx animations with an HTTP PUT to /files/<name> on that
       port (they are kept in the add-on's own storage); files in Home
       Assistant's media folder are used as a fallback. 0 turns the page off.
+  active_mode_minutes:
+    name: "🎧 Active mode · Minutes"
+    description: >-
+      Active mode (she listens without a wake word) ends by itself when you
+      haven't said anything for this long.
+  active_mode_window_seconds:
+    name: "🎧 Active mode · Window (seconds)"
+    description: >-
+      What you say this long after you last talked with her is taken to be
+      for her. Later she only answers her name or a question.
   second_persona_wake_word:
     name: "👥 Persona · Second persona wake word"
     description: >-

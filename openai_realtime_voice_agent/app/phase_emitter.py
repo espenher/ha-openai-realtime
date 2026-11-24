@@ -307,6 +307,18 @@ class PhaseEmitter(FrameProcessor):
         pre-wake VAD segment (see _speech_since_wake)."""
         self._speech_since_wake = False
 
+    async def note_turn(self) -> None:
+        """The user's turn came in some other way than through the realtime session
+        (active mode): she's thinking about it now."""
+        self._suppress_thinking = False
+        self._last_reply_question = False
+        self._follow_up_asked_at = None
+        self._reply_done = False
+        self._barged = False
+        self._cancel_pending_idle()
+        await self._emit("thinking")
+        self._arm_watchdog()
+
     def set_kill_window_handlers(self, on_dangling=None, on_real_speech=None) -> None:
         """Wire the dangling-VAD guard to the websocket_handler kill-window."""
         self._on_dangling_stop = on_dangling

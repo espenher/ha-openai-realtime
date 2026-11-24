@@ -28,6 +28,7 @@ import struct
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from app.active_mode import ACTIVE
 from app.avatar import HUB, MEDIA_DIRS, UPLOAD_DIR, avatar_actions, load_layout, save_layout
 from app.persona import CONFIG as PERSONA
 
@@ -377,6 +378,8 @@ def avatar_instructions(for_agent: bool = False) -> str:
     if _can_dance(layout):
         parts.append("\n\nDancing: [start dancing] you dance, and keep dancing while you talk, until [stop dancing]. "
                      "Dance when you're asked to, and stop when you're asked to stop (or to stop the music).")
+    if for_agent:
+        parts.append(ACTIVE.instructions())
     return "".join(parts)
 
 

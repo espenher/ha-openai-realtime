@@ -18,6 +18,7 @@ from pipecat.transports.websocket.server import WebsocketServerTransport
 from app.mcp_service import HomeAssistantMCPService
 from app.phase_emitter import TURN_LIVENESS, STALE_AUDIO
 from app.persona import CONFIG as PERSONA, SECOND as PERSONA_SECOND, STATE as PERSONA_STATE
+from app.active_mode import ACTIVE
 from app.avatar import HUB as AVATAR
 from app.avatar_body import avatar_tool_definitions, create_avatar_tool_handlers
 from app.disconnect_tool import get_disconnect_tool_definition, create_disconnect_tool_handler
@@ -901,6 +902,8 @@ class Application:
         
         announce_task = asyncio.create_task(self._announce_listener())
         _start_loop_watchdog()
+
+        asyncio.create_task(ACTIVE.load())
 
         # Avatar page (3D character that animates with the assistant). 0 = off.
         try:

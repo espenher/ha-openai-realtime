@@ -36,6 +36,7 @@ from pipecat.frames.frames import Frame, LLMFullResponseEndFrame, LLMFullRespons
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from app import memory
+from app.active_mode import is_quiet
 from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE
 
 logger = logging.getLogger(__name__)
@@ -96,10 +97,11 @@ class HAConversationAgent:
         self._lock = asyncio.Lock()   # a turn and the diary request never overlap
         self._zone_known = False
 
-    async def ask(self, text: str, context: str, situation: str = "", kind: str = "speech") -> str:
+    async def ask(self, text: str, context: str, situation: str = "", kind: str = "speech", aside: str = "") -> str:
         """situation: what she's doing right now (also in context); repeated when it changes.
         kind: "speech" (what speech-to-text heard from Espen) or "unprompted" (an
-        announcement or a touch she's told to speak up about), for the chat log."""
+        announcement or a touch she's told to speak up about), for the chat log.
+        aside: a hidden note for this turn only (what she overheard in active mode)."""
         await self._learn_time_zone()
         async with self._lock:
             new = self._conversation_id is None or time.monotonic() - self._last > CONVERSATION_IDLE_S
@@ -111,6 +113,7 @@ class HAConversationAgent:
             elif situation and situation != self._told:
                 hidden = f"(Right now, not said by the user: {situation})\n\n"
             self._told = situation
+            hidden += aside
             t0 = time.monotonic()
             data = await self._send(hidden + text, None if new else self._conversation_id)
             self._conversation_id = data.get("conversation_id") or self._conversation_id
@@ -119,8 +122,9 @@ class HAConversationAgent:
             logger.info(f"🧠 {PERSONA.second_agent} answered in {self._last - t0:.1f}s"
                         + (" (new conversation)" if new else ""))
             memory.log_turn(self._conversation_id, kind, text, hidden, speech)
-            memory.touch_talked()
-            self._espen_spoke = self._espen_spoke or kind == "speech"
+            if not is_quiet(speech):   # what she only overheard doesn't count as having talked
+                memory.touch_talked()
+                self._espen_spoke = self._espen_spoke or kind == "speech"
         if self._ending:
             self._ending.cancel()
         self._ending = asyncio.create_task(self._end_after_quiet(self._conversation_id))

@@ -15,6 +15,7 @@
   #status { position: fixed; left: 12px; bottom: 10px; color: var(--muted); font-size: 12px;
             opacity: .7; transition: opacity .6s; pointer-events: none; }
   #status.hidden { opacity: 0; }
+  #activeBadge { position: fixed; right: 12px; bottom: 10px; font-size: 12px; color: #7fd6a8; pointer-events: none; }
   #debug { position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,.6); padding: 8px 10px;
            border-radius: 8px; font: 12px ui-monospace, monospace; white-space: pre; display: none; }
   #editToggle { position: fixed; top: 10px; right: 10px; opacity: 0; transition: opacity .3s; }
@@ -76,6 +77,7 @@
 <body class="viewing">
 <div id="stage"></div>
 <div id="status">Connecting…</div>
+<div id="activeBadge" hidden>● Active</div>
 <div id="debug"></div>
 <button id="editToggle" title="Edit the room (M)">✎ Edit room</button>
 <button id="handToggle" title="A hand to touch her with (H): the mouse moves it, the scroll wheel nearer and further, hold the left button to grab">🖐</button>
@@ -2552,11 +2554,15 @@ let lastPhase = 'idle';
 const envelope = [];
 let envCursor = 0, mouth = 0;
 
+// Active mode: she hears Espen without a wake word (active_mode.py).
+function showActive(on) { document.getElementById('activeBadge').hidden = !on; }
+
 function onMessage(msg) {
   const now = performance.now() / 1000;
   switch (msg.type) {
     case 'state':
       lastPhase = msg.phase || 'idle';
+      showActive(msg.active);
       if (msg.persona) showPersona(msg.persona);
       setStatus(`${msg.persona || ''} connected`, true);
       // Just opened: start out as she is. Reconnected (the add-on restarted): tell it.
@@ -2566,6 +2572,7 @@ function onMessage(msg) {
       break;
     case 'activity': if (active) followActivity(active, msg.value, false, msg.spot); break;
     case 'persona': showPersona(msg.value); break;
+    case 'active': showActive(msg.value); break;
     case 'phase':
       quietSince = now;
       lastPhase = msg.value;

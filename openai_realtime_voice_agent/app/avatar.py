@@ -51,6 +51,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from app import memory
+from app.active_mode import ACTIVE
 from app.mic_test import MIC_TEST
 from app.persona import CONFIG as PERSONA
 
@@ -145,7 +146,7 @@ class AvatarHub:
 
     def __init__(self) -> None:
         self._clients: set[web.WebSocketResponse] = set()
-        self._state = {"phase": "idle", "persona": None, "activity": "standing", "spot": None}
+        self._state = {"phase": "idle", "persona": None, "activity": "standing", "spot": None, "active": False}
         # Set by the websocket handler: refreshes the live session's instructions
         # when the editor saves new moods/gestures, and when she sits, stands or dances.
         self.on_layout_saved = None
@@ -186,6 +187,7 @@ class AvatarHub:
         app.router.add_get("/chat", self._chat_page)
         app.router.add_get("/look/{n}", self._look)
         app.router.add_get("/mictest", MIC_TEST.handle)
+        app.router.add_put("/voiceprint", self._put_voiceprint)
         app.router.add_get("/ws", self._ws)
         runner = web.AppRunner(app, access_log=None)
         await runner.setup()
@@ -360,6 +362,17 @@ class AvatarHub:
             raise web.HTTPNotFound()
         return web.FileResponse(path, headers={"Cache-Control": "no-store"})
 
+    async def _put_voiceprint(self, request: web.Request) -> web.Response:
+        """Espen's voice prints, for active mode. (The header keeps web pages from sending one.)"""
+        if "X-Voiceprint" not in request.headers:
+            raise web.HTTPForbidden(text="Needs the X-Voiceprint header.")
+        try:
+            count = ACTIVE.save_voiceprint(await request.json())
+        except (ValueError, KeyError, TypeError) as e:
+            raise web.HTTPBadRequest(text=f"Not a voice print: {e}")
+        logger.info(f"🎧 voice print saved ({count} prints)")
+        return web.json_response({"prints": count, "available": ACTIVE.available})
+
     async def _ws(self, request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
@@ -414,7 +427,7 @@ class AvatarHub:
         return bool(self._clients)
 
     def send(self, obj: dict) -> None:
-        if obj.get("type") in ("phase", "persona", "activity"):
+        if obj.get("type") in ("phase", "persona", "activity", "active"):
             self._state[obj["type"]] = obj.get("value")
         if obj.get("type") == "activity":
             self._state["spot"] = obj.get("spot")

@@ -42,6 +42,11 @@ RUN mkdir -p /tmp/app_build/app && touch /tmp/app_build/app/__init__.py \
     && pip3 uninstall -y openai-realtime-voice-agent \
     && rm -rf /tmp/app_build
 
+# The voice model active mode knows Espen by (3D-Speaker CAM++, Apache 2.0, 28 MB).
+RUN mkdir -p /models \
+    && curl -fsSL -o /models/speaker.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx \
+    && echo "98daf9bcf1c8abf3db374fec4c27a5eda7c58705bb3f180d057b085a72a88bb5  /models/speaker.onnx" | sha256sum -c -
+
 # App code (kept at /app for `python3 -m app.main` and easy inspection)
 COPY app/ /app/
 

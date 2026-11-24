@@ -26,6 +26,7 @@ from app.persona import CONFIG as PERSONA, SECOND, STATE as PERSONA_STATE, TtsGa
 from app.avatar import HUB as AVATAR, AvatarTags, AvatarTap
 from app.avatar_body import TOUCH_NOTE_S, avatar_instructions, body_tag_action, describe_activity
 from app.ha_agent import MODE as AGENT_MODE, AgentReplies, HAConversationAgent
+from app.active_mode import ACTIVE
 from app.mic_test import MIC_TEST
 from app.transcript_logger import TranscriptLogger
 
@@ -535,7 +536,7 @@ class WebSocketHandler:
         agent_components = [agent_replies] if agent_replies else []
         tag_components = []
         if PERSONA.second_available:
-            tag_components = [AvatarTags(body_tag_action,
+            tag_components = [AvatarTags(lambda value: ACTIVE.tag_action(value) or body_tag_action(value),
                                          on_silent_reply=lambda: phase_emitter.force_idle("reply was only tags"))]
             from pipecat.services.elevenlabs.tts import ElevenLabsTTSService
             from app.elevenlabs_tts import SafeElevenLabsTTSService
@@ -901,7 +902,7 @@ class WebSocketHandler:
                 await _sync_agent_mode()   # its switch may have changed since the last wake
             if AGENT_MODE.active:
                 try:
-                    reply = await ha_agent.ask(agent_text, avatar_instructions(for_agent=True), describe_activity(),
+                    reply = await ha_agent.ask(agent_text, avatar_instructions(for_agent=True), _situation(),
                                                kind="unprompted")
                 except Exception as e:
                     logger.warning(f"🧠 the agent couldn't speak up: {e!r}")
@@ -961,7 +962,7 @@ class WebSocketHandler:
 
         self.announce = _announce
         MIC_TEST.connect(self._send_phase,
-                         lambda: bool(self._websockets) and phase_emitter._current in (None, "idle"))
+                         lambda: bool(self._websockets) and phase_emitter._current in (None, "idle") and not ACTIVE.on)
 
         # With the main persona turned off, pages show her from the start instead of
         # his body for the half minute until the startup switch to her.
@@ -1011,10 +1012,14 @@ class WebSocketHandler:
             except Exception as e:
                 logger.warning(f"🧠 couldn't update the agent mode: {e!r}")
 
+        def _situation() -> str:
+            return " ".join(filter(None, [describe_activity(), ACTIVE.situation()]))
+
         async def _answer_with_agent(text: str) -> None:
             TURN_LIVENESS.tool_started()   # keeps the thinking watchdog from giving up while the agent works
             try:
-                reply = await ha_agent.ask(text, avatar_instructions(for_agent=True), describe_activity())
+                reply = await ha_agent.ask(text, avatar_instructions(for_agent=True), _situation(),
+                                           aside=ACTIVE.take_overheard())
             except asyncio.CancelledError:
                 logger.info("🧠 agent answer dropped (stopped or superseded)")
                 raise
@@ -1024,6 +1029,10 @@ class WebSocketHandler:
             finally:
                 TURN_LIVENESS.tool_finished()
             _agent_task["text"] = ""
+            ACTIVE.note_reply(reply)
+            if not reply.strip():   # nothing to speak, so nothing would end the turn
+                await phase_emitter.force_idle("empty reply")
+                return
             await agent_replies.speak(reply)
 
         async def _quick_switch_persona(target: str) -> bool:
@@ -1192,6 +1201,40 @@ class WebSocketHandler:
 
         self._user_transcript_handler = _on_user_transcript
 
+        # Active mode (active_mode.py): he talks without waking the device.
+        async def _take_active_turn(text: str) -> bool:
+            if not AGENT_MODE.active:
+                await ACTIVE.stop("her agent is off")
+                return False
+            if phase_emitter._current == "replying":
+                return False
+            if tts_service is not None:
+                asyncio.create_task(tts_service.ensure_connected())
+            phase_emitter.note_device_mic_opened()
+            await phase_emitter.note_turn()
+            await _on_user_transcript(text)
+            return True
+
+        async def _woken_while_active() -> None:
+            phase_emitter.note_device_mic_opened()
+            _last_wake["t"] = time.monotonic()
+            if tts_service is not None:
+                asyncio.create_task(tts_service.ensure_connected())
+            if await phase_emitter.barge_in():
+                await phase_emitter._emit("idle")   # active mode listens from here
+
+        async def _tell_device(value: str) -> None:
+            await self.broadcast_json({"type": "phase", "value": value})
+
+        ACTIVE.connect(
+            phase=lambda: phase_emitter._current,
+            send_listening=lambda: _tell_device("listening"),
+            send_idle=lambda: _tell_device("idle"),
+            take_turn=_take_active_turn,
+            woken=_woken_while_active,
+            page=AVATAR.send,
+        )
+
         if self._serializer is not None:
             self._serializer.set_interrupt_handler(_on_device_interrupt)
             self._serializer.set_session_start_handler(_on_device_session_start)
@@ -1252,19 +1295,21 @@ class WebSocketHandler:
 
     async def broadcast_request_follow_up(self) -> None:
         """Ask every connected device to open the mic for one answer."""
+        if ACTIVE.on:   # it's open anyway
+            return
         await self.broadcast_json({"type": "request_follow_up"})
 
     async def broadcast_phase(self, value: str) -> None:
         """Send a va_client phase message to every connected device."""
         if MIC_TEST.recording:   # the mic test holds the device's phase itself
             return
-        await self._send_phase(value)
+        await self._send_phase(value, ACTIVE.device_phase(value))   # in active mode its mic stays open
 
-    async def _send_phase(self, value: str) -> None:
+    async def _send_phase(self, value: str, to_device: str | None = None) -> None:
         # TEMP instrumentation: log the broadcast + how many device sockets we
         # think are connected (was debug).
         logger.info(f"➡️ broadcast phase '{value}' to {len(self._websockets)} device(s)")
-        await self.broadcast_json({"type": "phase", "value": value})
+        await self.broadcast_json({"type": "phase", "value": to_device or value})
         AVATAR.send({"type": "phase", "value": value})
     
     def setup_event_handlers(
