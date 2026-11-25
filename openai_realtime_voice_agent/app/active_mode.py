@@ -12,8 +12,9 @@ While it's on:
   what Espen says by his voice print, and leaves everybody and everything else out. Only
   that is transcribed (transcribe.py).
 - What he says is for her if they've talked in the last ACTIVE_MODE_WINDOW_SECONDS, if it
-  has her name in it, or if it's a question. She gets it like any other turn, and may
-  answer just [quiet] if it wasn't for her after all.
+  has her name in it, or if it's a question. She gets it like any other turn, with a hidden
+  note on how likely it is to be for her (WHY), and may answer just [quiet] if it isn't.
+  The avatar page says when she heard him and stays silent.
 - The rest she isn't asked about. She gets the last few lines of it along with the next
   turn (hidden, "not necessarily to you"); it doesn't count as having talked.
 
@@ -46,8 +47,17 @@ HOLD_EVERY_S = 10       # the device is reminded to keep listening, in case it r
 OVERHEARD_LINES = 8
 OVERHEARD_S = 600       # older lines aren't passed on
 TWICE_S = 6             # two stops within this end it
+WOKEN_S = 15            # what he says this long after the wake word is what he woke her for
 CLOSE = 0.15            # speech that isn't his but sounds this much like him is worth a log line
 BUSY_PIECES = 250       # this much mic audio waiting (4 s) means the models can't keep up
+
+# Why what he said is taken to be for her, as she's told it along with his words.
+WHY = {
+    "woken": "He woke you to say this: it's for you.",
+    "name": "He said your name: answer him.",
+    "talking": "You two were just talking: take it as said to you, unless it clearly isn't.",
+    "question": "You two haven't talked for a bit, but it's a question: it may be for you.",
+}
 
 TAG = re.compile(r"\[[^\]\n]{0,300}\]\s*")
 
@@ -76,6 +86,7 @@ class ActiveMode:
         self._deaf = False            # while she talks
         self._mic_at = 0.0            # when mic audio last came
         self._said: list[str] = []    # transcribed, while he goes on talking
+        self._why = ""                # why his last words are for her (a key of WHY)
         self._overheard: deque = deque(maxlen=OVERHEARD_LINES)   # (when, text)
         self._window_until = 0.0      # until when what he says is taken to be for her
         self._window_before = 0.0     # what that was before the last turn
@@ -146,7 +157,7 @@ class ActiveMode:
         self._audio, self._utterances = asyncio.Queue(), asyncio.Queue()
         self._audio.put_nowait(None)
         self._deaf = self._phase() == "replying"
-        self._said, self._quiet, self._looking = [], False, False
+        self._said, self._why, self._quiet, self._looking = [], "", False, False
         self._overheard.clear()
         self._heard_at, self._window_until, self._mic_at = now, now + self._window_s, now
         self._tasks = [asyncio.create_task(self._keep_on(job)) for job in (self._listen, self._answer, self._watch)]
@@ -168,7 +179,7 @@ class ActiveMode:
     async def stop(self, why: str) -> None:
         if not self.on:
             return
-        self.on = False
+        self.on, self._why = False, ""
         me = asyncio.current_task()
         for task in self._tasks:
             if task is not me:
@@ -335,21 +346,32 @@ class ActiveMode:
         if not text:
             self._look(False)
             return
-        if not self._for_her(text):
+        why = self._for_her(text)
+        if not why:
             logger.info(f"🎧 not for her ({len(text.split())} words, transcribed in {took:.1f}s)")
             self._overheard.append((time.monotonic(), text))
             self._look(False)
+            self._page({"type": "heard", "value": "not for her"})
             return
-        logger.info(f"🎧 for her ({len(text.split())} words, transcribed in {took:.1f}s)")
+        logger.info(f"🎧 for her ({why}; {len(text.split())} words, transcribed in {took:.1f}s)")
+        self._why = why
         self._window_before = self._window_until
         self._window_until = time.monotonic() + self._window_s
         if not await self._take_turn(text):
+            self._why = ""
             self._overheard.append((time.monotonic(), text))
             self._look(False)
 
-    def _for_her(self, text: str) -> bool:
-        return (time.monotonic() < self._window_until or text.rstrip(" \"'”’)").endswith("?")
-                or bool(self._name().search(text)))
+    def _for_her(self, text: str) -> str:
+        """Why it's for her (a key of WHY); "" if it isn't."""
+        now = time.monotonic()
+        if now - self._woken_at < WOKEN_S:
+            return "woken"
+        if self._name().search(text):
+            return "name"
+        if now < self._window_until:
+            return "talking"
+        return "question" if text.rstrip(" \"'”’)").endswith("?") else ""
 
     @staticmethod
     def _name() -> re.Pattern:
@@ -371,16 +393,22 @@ class ActiveMode:
         self._quiet = is_quiet(reply)
         if self._quiet:
             logger.info("🎧 she stays quiet")
+            self._page({"type": "heard", "value": "stays quiet"})
 
-    def take_overheard(self) -> str:
-        """What she overheard since last time, as a hidden note with the next turn."""
+    def take_aside(self) -> str:
+        """A hidden note with his words: what she overheard since last time, and why this
+        is for her."""
         now = time.monotonic()
         lines = [text for at, text in self._overheard if now - at < OVERHEARD_S]
         self._overheard.clear()
-        if not lines:
-            return ""
-        return ("(Overheard from Espen before this, not necessarily said to you: "
-                + " / ".join(lines) + ")\n\n")
+        why, self._why = self._why, ""
+        aside = ""
+        if lines:
+            aside = ("(Overheard from Espen before this, not necessarily said to you: "
+                     + " / ".join(lines) + ")\n\n")
+        if why:
+            aside += f"(Heard in active mode. {WHY[why]})\n\n"
+        return aside
 
     def instructions(self) -> str:
         """For her notes, at the start of a conversation."""
@@ -395,10 +423,11 @@ class ActiveMode:
     def situation(self) -> str:
         """What holds right now (she's told when it changes)."""
         if self.on:
-            return ("You're in active mode: you hear what Espen says without a wake word, also when he's talking "
-                    "to somebody else or to himself. Answer what's for you, or when you really have something to "
-                    "add. Otherwise your whole reply is just [quiet] (the one tag that may stand alone): nobody "
-                    "hears anything then, and you needn't explain it.")
+            return ("You're in active mode: you hear what Espen says without a wake word. Talk with him as usual. "
+                    "You may also hear what isn't for you (he talks to somebody else, or reacts to a game or a "
+                    "video): when that's clear and you have nothing to add, your whole reply is just [quiet] (the "
+                    "one tag that may stand alone), and nobody hears anything. When in doubt, answer: to him, "
+                    "silence looks like you didn't hear him.")
         return "Active mode is over: you only hear Espen after he wakes you." if self._ever_on else ""
 
 

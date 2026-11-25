@@ -2556,6 +2556,13 @@ let envCursor = 0, mouth = 0;
 
 // Active mode: she hears Espen without a wake word (active_mode.py).
 function showActive(on) { document.getElementById('activeBadge').hidden = !on; }
+let heardTimer = 0;
+function showHeard(how) {   // she heard him, and says nothing
+  const badge = document.getElementById('activeBadge');
+  badge.textContent = '● Active · heard you, ' + how;
+  clearTimeout(heardTimer);
+  heardTimer = setTimeout(() => { badge.textContent = '● Active'; }, 5000);
+}
 
 function onMessage(msg) {
   const now = performance.now() / 1000;
@@ -2573,6 +2580,7 @@ function onMessage(msg) {
     case 'activity': if (active) followActivity(active, msg.value, false, msg.spot); break;
     case 'persona': showPersona(msg.value); break;
     case 'active': showActive(msg.value); break;
+    case 'heard': showHeard(msg.value); break;
     case 'phase':
       quietSince = now;
       lastPhase = msg.value;

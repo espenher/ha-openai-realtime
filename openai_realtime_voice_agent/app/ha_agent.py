@@ -101,7 +101,8 @@ class HAConversationAgent:
         """situation: what she's doing right now (also in context); repeated when it changes.
         kind: "speech" (what speech-to-text heard from Espen) or "unprompted" (an
         announcement or a touch she's told to speak up about), for the chat log.
-        aside: a hidden note for this turn only (what she overheard in active mode)."""
+        aside: a hidden note for this turn only (in active mode: what she overheard, and
+        why this is for her)."""
         await self._learn_time_zone()
         async with self._lock:
             new = self._conversation_id is None or time.monotonic() - self._last > CONVERSATION_IDLE_S

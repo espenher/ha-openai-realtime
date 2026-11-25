@@ -1019,7 +1019,7 @@ class WebSocketHandler:
             TURN_LIVENESS.tool_started()   # keeps the thinking watchdog from giving up while the agent works
             try:
                 reply = await ha_agent.ask(text, avatar_instructions(for_agent=True), _situation(),
-                                           aside=ACTIVE.take_overheard())
+                                           aside=ACTIVE.take_aside())
             except asyncio.CancelledError:
                 logger.info("🧠 agent answer dropped (stopped or superseded)")
                 raise
