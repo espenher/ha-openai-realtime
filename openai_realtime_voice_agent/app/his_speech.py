@@ -1,7 +1,8 @@
 """Finds what Espen says in an open mic, and leaves out everybody and everything else.
 
 feed() gets the mic as it comes and returns what it found: "started" when he begins to
-talk, then the whole Utterance when he's done. Two things make it out as his:
+talk, then the whole Utterance when he's done (or Unknown, for speech that isn't his).
+Two things make it out as his:
 
 - While there's speech (anyone's), the last VOICE_S of it are compared with his voice
   print every VOICE_EVERY_S. His utterance is where that fits.
@@ -50,6 +51,13 @@ class Utterance:
     ended: str           # "finished", "long pause", "other voice" or "too long"
 
 
+@dataclass
+class Unknown:
+    """A stretch of speech that wasn't taken to be his."""
+    seconds: float
+    score: float         # how much it sounds like him, at best
+
+
 class HisSpeech:
     def __init__(self, detector: SpeechDetector, voice: VoicePrint, turn_end: TurnEnd) -> None:
         self._detector, self._voice, self._turn_end = detector, voice, turn_end
@@ -72,6 +80,7 @@ class HisSpeech:
         self._begin: int | None = None   # where his utterance began, while there is one
         self._his_until = 0        # where his voice was last heard
         self._best = 0.0
+        self._closest = 0.0        # the same, for a stretch that isn't his (so far)
 
     @property
     def talking(self) -> bool:
@@ -100,7 +109,7 @@ class HisSpeech:
             if not self._speech:
                 self._speech, self._asked = True, False
                 if self._ended or self._now - self._until > PAUSE_S * RATE:   # a new stretch
-                    self._from, self._ended = self._now - len(piece), False
+                    self._from, self._ended, self._closest = self._now - len(piece), False, 0.0
                     self._next_voice = self._from + int(SHORT_S * RATE)
             self._until = self._now
         else:
@@ -120,6 +129,7 @@ class HisSpeech:
 
     def _compare(self, start: int, end: int, limit: float, found: list) -> None:
         score = self._voice.score(self._piece(start, end))
+        self._closest = max(self._closest, score)
         if score < limit:
             return
         self._his_until, self._best = end, max(self._best, score)
@@ -140,6 +150,8 @@ class HisSpeech:
                     self._compare(max(self._from, self._until - int(VOICE_S * RATE)), self._until, limit, found)
             if self._begin is None:   # nobody he knows
                 self._ended = True
+                if seconds >= SHORTEST_S:
+                    found.append(Unknown(seconds, self._closest))
                 return
             stretch = self._piece(max(self._from, self._begin), self._now)
             if self._turn_end(stretch) >= FINISHED:
@@ -156,7 +168,7 @@ class HisSpeech:
         found.append(Utterance(audio, self._begin, (end - self._begin) / RATE, self._best, how))
         self._begin, self._best, self._ended = None, 0.0, True
         if self._speech:   # somebody is still talking: a stretch of its own
-            self._from, self._ended, self._asked = end, False, False
+            self._from, self._ended, self._asked, self._closest = end, False, False, 0.0
             self._next_voice = self._now
 
     def _piece(self, start: int, end: int) -> np.ndarray:

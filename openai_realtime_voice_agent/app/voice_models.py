@@ -40,24 +40,37 @@ def _pipecat_file(package: str, name: str) -> Path:
 
 
 class SpeechDetector:
-    """The chance that a piece of 512 samples (32 ms) is speech."""
+    """The chance that a piece of 512 samples (32 ms) is speech.
+
+    Its memory is cleared after each QUIET_S without speech. Left running, the model goes
+    numb: after two minutes of room noise it found 12% of the first ten seconds of speech."""
 
     SIZE = 512
     CONTEXT = 64
+    QUIET_S = 1.0
+    QUIET = 0.35   # a chance below this is no speech
 
     def __init__(self, path=None) -> None:
         self._model = _session(path or _pipecat_file("pipecat.audio.vad.data", "silero_vad.onnx"))
         self.reset()
 
     def reset(self) -> None:
-        self._state = np.zeros((2, 1, 128), np.float32)
+        self._clear()
         self._before = np.zeros((1, self.CONTEXT), np.float32)
+
+    def _clear(self) -> None:
+        self._state = np.zeros((2, 1, 128), np.float32)
+        self._quiet = 0   # pieces without speech since
 
     def __call__(self, piece: np.ndarray) -> float:
         x = np.concatenate([self._before, piece[None].astype(np.float32)], axis=1)
         chance, self._state = self._model.run(None, {"input": x, "state": self._state, "sr": np.array(RATE, np.int64)})
         self._before = x[:, -self.CONTEXT:]
-        return float(chance[0][0])
+        chance = float(chance[0][0])
+        self._quiet = self._quiet + 1 if chance < self.QUIET else 0
+        if self._quiet * self.SIZE >= self.QUIET_S * RATE:
+            self._clear()
+        return chance
 
 
 # ---------- whose voice ----------

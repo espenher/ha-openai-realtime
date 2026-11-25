@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.his_speech import HisSpeech, Utterance
+from app.his_speech import HisSpeech, Unknown, Utterance
 from app.transcribe import transcribe
 from app.voice_models import RATE, SpeechDetector, TurnEnd, VoicePrint
 
@@ -46,6 +46,7 @@ HOLD_EVERY_S = 10       # the device is reminded to keep listening, in case it r
 OVERHEARD_LINES = 8
 OVERHEARD_S = 600       # older lines aren't passed on
 TWICE_S = 6             # two stops within this end it
+CLOSE = 0.15            # speech that isn't his but sounds this much like him is worth a log line
 BUSY_PIECES = 250       # this much mic audio waiting (4 s) means the models can't keep up
 
 TAG = re.compile(r"\[[^\]\n]{0,300}\]\s*")
@@ -73,6 +74,7 @@ class ActiveMode:
         self._audio: asyncio.Queue = asyncio.Queue()        # mic audio; None: forget what was heard
         self._utterances: asyncio.Queue = asyncio.Queue()
         self._deaf = False            # while she talks
+        self._mic_at = 0.0            # when mic audio last came
         self._said: list[str] = []    # transcribed, while he goes on talking
         self._overheard: deque = deque(maxlen=OVERHEARD_LINES)   # (when, text)
         self._window_until = 0.0      # until when what he says is taken to be for her
@@ -146,12 +148,22 @@ class ActiveMode:
         self._deaf = self._phase() == "replying"
         self._said, self._quiet, self._looking = [], False, False
         self._overheard.clear()
-        self._heard_at, self._window_until = now, now + self._window_s
-        self._tasks = [asyncio.create_task(job()) for job in (self._listen, self._answer, self._watch)]
+        self._heard_at, self._window_until, self._mic_at = now, now + self._window_s, now
+        self._tasks = [asyncio.create_task(self._keep_on(job)) for job in (self._listen, self._answer, self._watch)]
         self._page({"type": "active", "value": True})
         logger.info("🎧 active mode on")
         if self._phase() in (None, "idle"):
             await self._send_listening()
+
+    async def _keep_on(self, job) -> None:
+        """Run one of its jobs, again if it fails."""
+        while self.on:
+            try:
+                await job()
+                return
+            except Exception as e:
+                logger.warning(f"🎧 {job.__name__} failed, starting it again: {e!r}")
+                await asyncio.sleep(1)
 
     async def stop(self, why: str) -> None:
         if not self.on:
@@ -186,7 +198,7 @@ class ActiveMode:
             self._deaf = True
             self._audio.put_nowait(None)
         elif value == "idle":   # her turn is over: back to listening
-            now = time.monotonic()
+            now = self._mic_at = time.monotonic()
             self._deaf = False
             self._audio.put_nowait(None)
             if self._quiet:
@@ -201,6 +213,7 @@ class ActiveMode:
         """Mic audio. True if active mode took it."""
         if not self.on:
             return False
+        self._mic_at = time.monotonic()
         if not self._deaf:
             self._audio.put_nowait(pcm)
         return True
@@ -247,7 +260,7 @@ class ActiveMode:
             await self._send_listening()
 
     async def _watch(self) -> None:
-        stuck = False
+        stuck = silent = False
         while True:
             await asyncio.sleep(HOLD_EVERY_S)
             if time.monotonic() - self._heard_at > self._minutes * 60:
@@ -259,6 +272,10 @@ class ActiveMode:
                 stuck = self._deaf
                 if not stuck:
                     await self._send_listening()
+                    if silent != (time.monotonic() - self._mic_at > HOLD_EVERY_S):
+                        silent = not silent
+                        logger.warning("🎧 no mic audio is coming from the device" if silent
+                                       else "🎧 mic audio is coming again")
 
     # ---------- what he says ----------
 
@@ -289,6 +306,9 @@ class ActiveMode:
                 if isinstance(event, Utterance):
                     logger.info(f"🎧 Espen, {event.seconds:.1f}s (voice {event.score:.2f}, {event.ended})")
                     self._utterances.put_nowait(event)
+                elif isinstance(event, Unknown):
+                    if event.score >= CLOSE:
+                        logger.info(f"🎧 not Espen's voice, {event.seconds:.1f}s (voice {event.score:.2f})")
                 elif time.monotonic() < self._window_until and self._phase() in (None, "idle"):
                     self._look(True)
 
